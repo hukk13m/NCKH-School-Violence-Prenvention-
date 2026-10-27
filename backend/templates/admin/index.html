@@ -1,0 +1,135 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block content %}
+<div class="container-fluid" style="padding: 20px;">
+    
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card card-primary card-outline">
+                <div class="card-header">
+                    <h3 class="card-title"><i class="fas fa-filter"></i> Lọc dữ liệu thời gian</h3>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-4">
+                            <label>Từ ngày:</label>
+                            <input type="date" id="start_date" class="form-control">
+                        </div>
+                        <div class="col-md-4">
+                            <label>Đến ngày:</label>
+                            <input type="date" id="end_date" class="form-control">
+                        </div>
+                        <div class="col-md-4 d-flex align-items-end">
+                            <button id="filter_btn" class="btn btn-primary w-100"><i class="fas fa-search"></i> Áp dụng bộ lọc</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="info-box bg-info">
+                <span class="info-box-icon"><i class="fas fa-file-alt"></i></span>
+                <div class="info-box-content">
+                    <span class="info-box-text">Tổng số Hồ sơ Vi phạm (Trong kỳ)</span>
+                    <span class="info-box-number" id="total_cases">Đang tải...</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header border-0">
+                    <h3 class="card-title">Phân bổ theo Mức độ (Priority)</h3>
+                </div>
+                <div class="card-body">
+                    <canvas id="priorityChart" style="min-height: 250px; height: 250px; max-height: 250px; max-width: 100%;"></canvas>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header border-0">
+                    <h3 class="card-title">Phân bổ theo Trạng thái (Status)</h3>
+                </div>
+                <div class="card-body">
+                    <canvas id="statusChart" style="min-height: 250px; height: 250px; max-height: 250px; max-width: 100%;"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+    let priorityChart = null;
+    let statusChart = null;
+
+    function renderCharts(data) {
+        // Priority Chart (Pie)
+        const priorityLabels = data.priority.map(item => item.priority || 'Chưa phân loại');
+        const priorityData = data.priority.map(item => item.count);
+        
+        const priorityCtx = document.getElementById('priorityChart').getContext('2d');
+        if (priorityChart) priorityChart.destroy();
+        priorityChart = new Chart(priorityCtx, {
+            type: 'pie',
+            data: {
+                labels: priorityLabels,
+                datasets: [{
+                    data: priorityData,
+                    backgroundColor: ['#f56954', '#00a65a', '#f39c12', '#00c0ef', '#3c8dbc', '#d2d6de'],
+                }]
+            }
+        });
+
+        // Status Chart (Bar)
+        const statusLabels = data.status.map(item => item.status || 'Khác');
+        const statusData = data.status.map(item => item.count);
+
+        const statusCtx = document.getElementById('statusChart').getContext('2d');
+        if (statusChart) statusChart.destroy();
+        statusChart = new Chart(statusCtx, {
+            type: 'bar',
+            data: {
+                labels: statusLabels,
+                datasets: [{
+                    label: 'Số lượng vụ việc',
+                    data: statusData,
+                    backgroundColor: '#3c8dbc'
+                }]
+            },
+            options: {
+                scales: {
+                    y: { beginAtZero: true }
+                }
+            }
+        });
+    }
+
+    function fetchData() {
+        const start = document.getElementById('start_date').value;
+        const end = document.getElementById('end_date').value;
+        let url = '/admin/dashboard_stats/?';
+        if (start) url += 'start=' + start + '&';
+        if (end) url += 'end=' + end;
+
+        fetch(url)
+            .then(res => res.json())
+            .then(data => {
+                document.getElementById('total_cases').innerText = data.total;
+                renderCharts(data);
+            });
+    }
+
+    document.getElementById('filter_btn').addEventListener('click', fetchData);
+
+    // Initial load
+    fetchData();
+</script>
+{% endblock %}
