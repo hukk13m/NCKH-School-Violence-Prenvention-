@@ -142,7 +142,7 @@ CORS_ALLOW_ALL_ORIGINS = True
 
 # Goong REST key (Autocomplete / Place Detail / Geocode). Keep it on the
 # server: the Flutter apps call /api/places/* instead of Goong directly.
-GOONG_API_KEY = os.environ.get('GOONG_API_KEY', 'WM0rSDLabCExKus2u3TC0eqsI5yr0YDcc7nB3Y0G')
+GOONG_API_KEY = os.environ.get('GOONG_API_KEY', 'Jps7umaVqnf9vbL7oa6KRaUG1dhncYGYRPYs09vQ')
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')

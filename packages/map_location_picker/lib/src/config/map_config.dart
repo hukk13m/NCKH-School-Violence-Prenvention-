@@ -7,7 +7,7 @@ class MapLocationPickerConfig {
   static bool get usesGoong => goongMapKey.trim().isNotEmpty;
 
   static String get normalStyle => usesGoong
-      ? 'https://tiles.goong.io/assets/goong_map_highlight.json'
+      ? 'https://tiles.goong.io/assets/goong_map_web.json'
             '?api_key=$goongMapKey'
       : fallbackStyle;
 
