@@ -1,18 +1,10 @@
 import 'dart:convert';
-import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import '../../../core/config/api_config.dart';
 import '../domain/auth_models.dart';
 import '../domain/auth_service.dart';
 
-String _getDefaultAuthBaseUrl() {
-  if (kIsWeb) {
-    return 'http://localhost:8000/api/users';
-  } else if (defaultTargetPlatform == TargetPlatform.android) {
-    return 'http://10.0.2.2:8000/api/users';
-  } else {
-    return 'http://localhost:8000/api/users';
-  }
-}
+String _getDefaultAuthBaseUrl() => '${resolveApiBaseUrl()}/api/users';
 
 class DjangoAuthService implements AuthService {
   DjangoAuthService({String? baseUrl})
@@ -21,11 +13,11 @@ class DjangoAuthService implements AuthService {
   final String baseUrl;
 
   Future<http.Response> _postJson(String endpoint, Map<String, dynamic> body) async {
-    final urls = <String>[
-      '$baseUrl/$endpoint',
-      if (baseUrl.contains('10.0.2.2')) 'http://127.0.0.1:8000/api/users/$endpoint',
-      if (baseUrl.contains('10.0.2.2')) 'http://localhost:8000/api/users/$endpoint',
-    ];
+    // Chỉ dùng thêm phương án dự phòng khi baseUrl còn là mặc định; nếu nơi
+    // gọi tự truyền baseUrl thì tôn trọng đúng giá trị đó.
+    final urls = baseUrl == _getDefaultAuthBaseUrl()
+        ? apiUrlCandidates('/api/users/$endpoint')
+        : <String>['$baseUrl/$endpoint'];
 
     Object? lastErr;
     for (final url in urls) {
@@ -75,7 +67,7 @@ class DjangoAuthService implements AuthService {
     } on AuthException {
       rethrow;
     } catch (e) {
-      throw AuthException(AuthErrorKind.network, message: 'Lỗi kết nối Server ($e). Hãy đảm bảo đã bật Django và gõ lệnh adb reverse!');
+      throw AuthException(AuthErrorKind.network, message: 'Lỗi kết nối Server ($e). Đang gọi $baseUrl. Kiểm tra Django đã chạy và địa chỉ API_BASE có đúng không.');
     }
   }
 

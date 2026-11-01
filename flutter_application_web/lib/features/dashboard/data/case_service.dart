@@ -2,7 +2,15 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
+const String _apiBaseOverride = String.fromEnvironment('API_BASE');
+
 String _getDefaultCaseBaseUrl() {
+  if (_apiBaseOverride.isNotEmpty) {
+    final root = _apiBaseOverride.endsWith('/')
+        ? _apiBaseOverride.substring(0, _apiBaseOverride.length - 1)
+        : _apiBaseOverride;
+    return '$root/api/cases';
+  }
   if (kIsWeb) {
     return 'http://localhost:8000/api/cases';
   } else if (defaultTargetPlatform == TargetPlatform.android) {
@@ -18,6 +26,8 @@ class CaseModel {
   final String incidentType;
   final String priority;
   final String location;
+  final double? latitude;
+  final double? longitude;
   final String description;
   final String status;
   final String createdAt;
@@ -29,6 +39,8 @@ class CaseModel {
     required this.incidentType,
     required this.priority,
     required this.location,
+    this.latitude,
+    this.longitude,
     required this.description,
     required this.status,
     required this.createdAt,
@@ -42,6 +54,8 @@ class CaseModel {
       incidentType: json['incident_type'] as String? ?? 'General',
       priority: json['priority'] as String? ?? 'Normal',
       location: json['location'] as String? ?? '',
+      latitude: (json['latitude'] as num?)?.toDouble(),
+      longitude: (json['longitude'] as num?)?.toDouble(),
       description: json['description'] as String? ?? '',
       status: json['status'] as String? ?? 'New',
       createdAt: json['created_at'] as String? ?? '',
@@ -89,6 +103,8 @@ class CaseService {
     required String reportType,
     required String priority,
     String? userId,
+    double? latitude,
+    double? longitude,
     List<UploadedFile> files = const [],
   }) async {
     final urls = <String>[
@@ -109,6 +125,10 @@ class CaseService {
         request.fields['location'] = location;
         request.fields['report_type'] = reportType;
         request.fields['priority'] = priority;
+        if (latitude != null && longitude != null) {
+          request.fields['latitude'] = latitude.toStringAsFixed(7);
+          request.fields['longitude'] = longitude.toStringAsFixed(7);
+        }
         if (userId != null) {
           request.fields['user_id'] = userId;
         }

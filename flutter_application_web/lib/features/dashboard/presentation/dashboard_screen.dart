@@ -2,11 +2,11 @@ import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:map_location_picker/map_location_picker.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import '../../auth/domain/auth_models.dart';
 import '../data/case_service.dart';
-import 'location_picker_dialog.dart';
 import 'web_utils.dart';
 
 class DashboardScreen extends StatefulWidget {
@@ -34,6 +34,11 @@ class _DashboardScreenState extends State<DashboardScreen>
   final TextEditingController _locationController = TextEditingController(
     text: 'Phòng 302, Tòa A',
   );
+
+  // Coordinates come from the map picker and are cleared as soon as the user
+  // edits the location text by hand, so a stale pin is never submitted.
+  PickedLocation? _pickedLocation;
+  String? _pickedDisplay;
 
   // User Profile State
   String _userFullName = 'Nguyễn Đình Huy';
@@ -70,6 +75,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   @override
   void initState() {
     super.initState();
+    _locationController.addListener(_onLocationTextChanged);
     _speechToText = stt.SpeechToText();
     _initSpeech();
     _pulseController = AnimationController(
@@ -144,6 +150,7 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   @override
   void dispose() {
+    _locationController.removeListener(_onLocationTextChanged);
     _reportController.dispose();
     _locationController.dispose();
     _pulseController.dispose();
@@ -226,15 +233,31 @@ class _DashboardScreenState extends State<DashboardScreen>
   Future<void> _openMapPicker() async {
     final result = await showDialog<PickedLocation>(
       context: context,
-      builder: (ctx) => const LocationPickerDialog(),
+      builder: (ctx) => LocationPickerDialog(
+        userAgentPackageName: 'com.example.flutter_application_web',
+        apiBaseUrl: const String.fromEnvironment(
+          'API_BASE',
+          defaultValue: 'http://localhost:8000',
+        ),
+        initial: _pickedLocation,
+      ),
     );
 
     if (result != null) {
       setState(() {
+        _pickedLocation = result;
+        _pickedDisplay = result.display;
         _locationController.text = result.display;
       });
       _showSuccessSnack('Đã chọn vị trí: ${result.display}');
     }
+  }
+
+  void _onLocationTextChanged() {
+    if (_pickedLocation == null) return;
+    if (_locationController.text == _pickedDisplay) return;
+    _pickedLocation = null;
+    _pickedDisplay = null;
   }
 
   // Camera Capture
@@ -249,19 +272,22 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   // File Upload
   Future<void> _pickFiles() async {
-    final result = await FilePicker.platform.pickFiles(allowMultiple: true, type: FileType.any, withData: true);
-    if (result == null || result.files.isEmpty) return;
-    setState(() {
-      _uploadedFiles.addAll(
-        result.files.where((f) => f.name.isNotEmpty)
-            .map((f) => UploadedFile(
-              name: f.name,
-              size: _formatBytes(f.size),
-              bytes: f.bytes,
-              path: f.path,
-            )),
-      );
-    });
+    final picked = await FilePicker.pickFiles(type: FileType.any);
+    if (picked.isEmpty) return;
+
+    final files = <UploadedFile>[];
+    for (final file in picked.where((f) => f.name.isNotEmpty)) {
+      final bytes = await file.readAsBytes();
+      files.add(UploadedFile(
+        name: file.name,
+        size: _formatBytes(file.lengthSync() ?? bytes.length),
+        bytes: bytes,
+        path: file.path,
+      ));
+    }
+
+    if (!mounted || files.isEmpty) return;
+    setState(() => _uploadedFiles.addAll(files));
   }
 
   // Download (Web)
@@ -673,6 +699,8 @@ class _DashboardScreenState extends State<DashboardScreen>
         reportType: 'Report',
         priority: 'Normal',
         userId: _userIdCode,
+        latitude: _pickedLocation?.latitude,
+        longitude: _pickedLocation?.longitude,
         files: processedFiles,
       );
 
@@ -719,6 +747,8 @@ class _DashboardScreenState extends State<DashboardScreen>
         reportType: 'SOS',
         priority: 'High',
         userId: _userIdCode,
+        latitude: _pickedLocation?.latitude,
+        longitude: _pickedLocation?.longitude,
       );
 
       setState(() {

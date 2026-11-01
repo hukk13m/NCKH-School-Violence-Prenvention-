@@ -1,16 +1,9 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import '../../../core/config/api_config.dart';
 
-String _getDefaultCaseBaseUrl() {
-  if (kIsWeb) {
-    return 'http://localhost:8000/api/cases';
-  } else if (defaultTargetPlatform == TargetPlatform.android) {
-    return 'http://10.0.2.2:8000/api/cases';
-  } else {
-    return 'http://localhost:8000/api/cases';
-  }
-}
+String _getDefaultCaseBaseUrl() => '${resolveApiBaseUrl()}/api/cases';
 
 class CaseModel {
   final int id;
@@ -18,6 +11,8 @@ class CaseModel {
   final String incidentType;
   final String priority;
   final String location;
+  final double? latitude;
+  final double? longitude;
   final String description;
   final String status;
   final String createdAt;
@@ -29,6 +24,8 @@ class CaseModel {
     required this.incidentType,
     required this.priority,
     required this.location,
+    this.latitude,
+    this.longitude,
     required this.description,
     required this.status,
     required this.createdAt,
@@ -42,6 +39,8 @@ class CaseModel {
       incidentType: json['incident_type'] as String? ?? 'General',
       priority: json['priority'] as String? ?? 'Normal',
       location: json['location'] as String? ?? '',
+      latitude: (json['latitude'] as num?)?.toDouble(),
+      longitude: (json['longitude'] as num?)?.toDouble(),
       description: json['description'] as String? ?? '',
       status: json['status'] as String? ?? 'New',
       createdAt: json['created_at'] as String? ?? '',
@@ -83,21 +82,27 @@ class CaseService {
   CaseService({String? baseUrl})
     : baseUrl = baseUrl ?? _getDefaultCaseBaseUrl();
 
+  /// URL sẽ thử cho [suffix]. Khi `baseUrl` còn là mặc định thì dùng thêm
+  /// phương án dự phòng của emulator; nếu nơi gọi tự truyền `baseUrl` thì
+  /// tôn trọng đúng giá trị đó.
+  List<String> _urlsFor(String suffix) {
+    if (baseUrl != _getDefaultCaseBaseUrl()) {
+      return <String>['$baseUrl$suffix'];
+    }
+    return apiUrlCandidates('/api/cases$suffix');
+  }
+
   Future<CaseModel> submitReport({
     required String description,
     required String location,
     required String reportType,
     required String priority,
     String? userId,
+    double? latitude,
+    double? longitude,
     List<UploadedFile> files = const [],
   }) async {
-    final urls = <String>[
-      '$baseUrl/create/',
-      if (baseUrl.contains('10.0.2.2'))
-        'http://127.0.0.1:8000/api/cases/create/',
-      if (baseUrl.contains('10.0.2.2'))
-        'http://localhost:8000/api/cases/create/',
-    ];
+    final urls = _urlsFor('/create/');
 
     Object? lastErr = 'Không thể kết nối API';
     for (final url in urls) {
@@ -109,6 +114,10 @@ class CaseService {
         request.fields['location'] = location;
         request.fields['report_type'] = reportType;
         request.fields['priority'] = priority;
+        if (latitude != null && longitude != null) {
+          request.fields['latitude'] = latitude.toStringAsFixed(7);
+          request.fields['longitude'] = longitude.toStringAsFixed(7);
+        }
         if (userId != null) {
           request.fields['user_id'] = userId;
         }
@@ -149,18 +158,12 @@ class CaseService {
         lastErr = e;
       }
     }
-    throw Exception('Không thể gửi báo cáo lên Server ($lastErr)');
+    throw Exception('Không thể gửi báo cáo lên Server $baseUrl ($lastErr)');
   }
 
   Future<List<CaseModel>> fetchCases({String? userId}) async {
     final query = userId != null ? '?user_id=$userId' : '';
-    final urls = <String>[
-      '$baseUrl/list/$query',
-      if (baseUrl.contains('10.0.2.2'))
-        'http://127.0.0.1:8000/api/cases/list/$query',
-      if (baseUrl.contains('10.0.2.2'))
-        'http://localhost:8000/api/cases/list/$query',
-    ];
+    final urls = _urlsFor('/list/$query');
 
     Object? errorMsg;
     for (final url in urls) {
@@ -181,7 +184,7 @@ class CaseService {
         errorMsg = e;
       }
     }
-    throw Exception('Không thể tải danh sách báo cáo ($errorMsg)');
+    throw Exception('Không thể tải danh sách báo cáo từ $baseUrl ($errorMsg)');
   }
 }
 

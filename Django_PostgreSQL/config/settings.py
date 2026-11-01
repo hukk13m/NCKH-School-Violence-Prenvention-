@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 
@@ -139,7 +140,10 @@ AUTH_USER_MODEL = 'users.User'
 # Flutter web uses a different localhost port when the dev server restarts.
 CORS_ALLOW_ALL_ORIGINS = True
 
-import os
+# Goong REST key (Autocomplete / Place Detail / Geocode). Keep it on the
+# server: the Flutter apps call /api/places/* instead of Goong directly.
+GOONG_API_KEY = os.environ.get('GOONG_API_KEY', 'WM0rSDLabCExKus2u3TC0eqsI5yr0YDcc7nB3Y0G')
+
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 

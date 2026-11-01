@@ -11,13 +11,11 @@ dependencies:
   flutter:
     sdk: flutter
 
-  file_picker: ^10.2.0
+  file_picker: ^13.2.0
   http: ^1.2.0
   speech_to_text: ^7.0.0
-  flutter_map: ^7.0.2
-  flutter_map_cancellable_tile_provider: ^3.0.0
-  latlong2: ^0.9.1
-  geocoding: ^3.0.0
+  map_location_picker:
+    path: ../packages/map_location_picker
   cupertino_icons: ^1.0.8
 
 dev_dependencies:

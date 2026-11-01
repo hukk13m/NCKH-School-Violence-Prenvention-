@@ -7,7 +7,7 @@ class EvidenceInline(admin.TabularInline):
 
 @admin.register(Case)
 class CaseAdmin(admin.ModelAdmin):
-    list_display = ('id', 'incident_type', 'priority', 'status', 'created_at', 'reporter')
+    list_display = ('id', 'incident_type', 'priority', 'status', 'created_at', 'reporter', 'latitude', 'longitude')
     list_filter = ('status', 'priority', 'incident_type')
     search_fields = ('description', 'incident_type', 'location')
     inlines = [EvidenceInline]

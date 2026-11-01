@@ -4,6 +4,18 @@ from django.views.decorators.csrf import csrf_exempt
 from users.models import User
 from .models import Case, Evidence
 
+def _parse_coordinate(value, minimum, maximum):
+    """Return a valid float coordinate, or None when missing/invalid."""
+    if value is None or value == '':
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if result < minimum or result > maximum:
+        return None
+    return result
+
 @csrf_exempt
 def create_case_api(request):
     if request.method != 'POST':
@@ -13,6 +25,8 @@ def create_case_api(request):
         if request.content_type and 'multipart/form-data' in request.content_type:
             description = request.POST.get('description', '').strip()
             location = request.POST.get('location', '').strip()
+            latitude = _parse_coordinate(request.POST.get('latitude'), -90, 90)
+            longitude = _parse_coordinate(request.POST.get('longitude'), -180, 180)
             report_type = request.POST.get('report_type', 'Report').strip()
             incident_type = request.POST.get('incident_type', 'General').strip()
             priority = request.POST.get('priority', 'Normal').strip()
@@ -24,6 +38,8 @@ def create_case_api(request):
                 data = request.POST
             description = data.get('description', '').strip()
             location = data.get('location', '').strip()
+            latitude = _parse_coordinate(data.get('latitude'), -90, 90)
+            longitude = _parse_coordinate(data.get('longitude'), -180, 180)
             report_type = data.get('report_type', 'Report').strip()
             incident_type = data.get('incident_type', 'General').strip()
             priority = data.get('priority', 'Normal').strip()
@@ -45,6 +61,8 @@ def create_case_api(request):
             incident_type=incident_type,
             priority=priority,
             location=location,
+            latitude=latitude,
+            longitude=longitude,
             description=description,
             status='New'
         )
@@ -95,6 +113,8 @@ def create_case_api(request):
                 'incident_type': case.incident_type,
                 'priority': case.priority,
                 'location': case.location,
+                'latitude': case.latitude,
+                'longitude': case.longitude,
                 'description': case.description,
                 'status': case.status,
                 'created_at': case.created_at.isoformat(),
@@ -142,6 +162,8 @@ def list_cases_api(request):
                 'incident_type': case.incident_type or 'General',
                 'priority': case.priority or 'Normal',
                 'location': case.location or '',
+                'latitude': case.latitude,
+                'longitude': case.longitude,
                 'description': case.description,
                 'status': case.status,
                 'created_at': case.created_at.isoformat(),

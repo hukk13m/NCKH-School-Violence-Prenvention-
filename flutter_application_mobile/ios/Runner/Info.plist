@@ -26,6 +26,16 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Ứng dụng cần vị trí của bạn để chọn địa điểm báo cáo trên bản đồ.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Ứng dụng cần máy ảnh để chụp ảnh làm bằng chứng khi gửi báo cáo.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Ứng dụng cần micrô để ghi âm bằng chứng khi gửi báo cáo.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>Ứng dụng cần danh bạ để chọn người thân nhận tin nhắn khẩn cấp.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Ứng dụng cần nhận dạng giọng nói để nhập nội dung báo cáo.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

@@ -4,7 +4,15 @@ import 'package:http/http.dart' as http;
 import '../domain/auth_models.dart';
 import '../domain/auth_service.dart';
 
+const String _apiBaseOverride = String.fromEnvironment('API_BASE');
+
 String _getDefaultAuthBaseUrl() {
+  if (_apiBaseOverride.isNotEmpty) {
+    final root = _apiBaseOverride.endsWith('/')
+        ? _apiBaseOverride.substring(0, _apiBaseOverride.length - 1)
+        : _apiBaseOverride;
+    return '$root/api/users';
+  }
   if (kIsWeb) {
     return 'http://localhost:8000/api/users';
   } else if (defaultTargetPlatform == TargetPlatform.android) {

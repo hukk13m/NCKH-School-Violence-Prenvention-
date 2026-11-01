@@ -2,12 +2,14 @@ import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:map_location_picker/map_location_picker.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 
+import '../../../core/config/api_config.dart';
 import '../../auth/domain/auth_models.dart';
+import '../../sos/data/sos_offline_queue.dart';
+import '../../sos/presentation/sos_entry_screen.dart';
 import '../data/case_service.dart';
-import '../platform/dashboard_platform.dart';
-import 'location_picker_dialog.dart';
 import 'web_utils.dart';
 
 class DashboardScreen extends StatefulWidget {
@@ -22,7 +24,6 @@ class _DashboardScreenState extends State<DashboardScreen>
   int _selectedIndex = 0;
   int? _hoveredIndex;
 
-  final DashboardPlatform _platform = createDashboardPlatform();
   final CaseService _caseService = CaseService();
   final List<UploadedFile> _uploadedFiles = [];
   List<CaseModel> _historyCases = [];
@@ -37,6 +38,11 @@ class _DashboardScreenState extends State<DashboardScreen>
     text: 'Phòng 302, Tòa A',
   );
 
+  // Coordinates come from the map picker and are cleared as soon as the user
+  // edits the location text by hand, so a stale pin is never submitted.
+  PickedLocation? _pickedLocation;
+  String? _pickedDisplay;
+
   // User Profile State
   String _userFullName = 'Nguyễn Đình Huy';
   String _userEmail = 'huy.nd@uel.edu.vn';
@@ -45,7 +51,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   String _userRole = 'Sinh viên UEL';
 
   bool _isVietnamese = true;
-  bool _hasNotification = true;
+  final bool _hasNotification = true;
   bool _isLoggedIn = true;
 
   // Audio Recording State
@@ -64,14 +70,27 @@ class _DashboardScreenState extends State<DashboardScreen>
   final GlobalKey _notifKey = GlobalKey();
 
   final List<_SidebarItem> _items = const [
-    _SidebarItem(title: 'Báo cáo', icon: Icons.report_problem_outlined, subtitle: 'Gửi thông tin mới'),
-    _SidebarItem(title: 'SOS Khẩn cấp', icon: Icons.sos_outlined, subtitle: 'Cấp cứu / Khẩn cấp'),
-    _SidebarItem(title: 'Xem báo cáo cũ', icon: Icons.history_edu_outlined, subtitle: 'Lịch sử đã gửi'),
+    _SidebarItem(
+      title: 'Báo cáo',
+      icon: Icons.report_problem_outlined,
+      subtitle: 'Gửi thông tin mới',
+    ),
+    _SidebarItem(
+      title: 'SOS Khẩn cấp',
+      icon: Icons.sos_outlined,
+      subtitle: 'Cấp cứu / Khẩn cấp',
+    ),
+    _SidebarItem(
+      title: 'Xem báo cáo cũ',
+      icon: Icons.history_edu_outlined,
+      subtitle: 'Lịch sử đã gửi',
+    ),
   ];
 
   @override
   void initState() {
     super.initState();
+    _locationController.addListener(_onLocationTextChanged);
     _speechToText = stt.SpeechToText();
     _initSpeech();
     _pulseController = AnimationController(
@@ -82,6 +101,7 @@ class _DashboardScreenState extends State<DashboardScreen>
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
     _fetchHistory();
+    _flushSosQueue();
   }
 
   @override
@@ -98,10 +118,30 @@ class _DashboardScreenState extends State<DashboardScreen>
           }
           if (args.email.isNotEmpty) _userEmail = args.email;
           _userIdCode = args.userId.isNotEmpty ? args.userId : _userIdCode;
-          _userRole = args.role == AuthRole.teacher ? 'Giảng viên UEL' : 'Sinh viên UEL';
+          _userRole = args.role == AuthRole.teacher
+              ? 'Giảng viên UEL'
+              : 'Sinh viên UEL';
         });
       }
       _initializedArgs = true;
+    }
+  }
+
+  Future<void> _openSos() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) =>
+            SosEntryScreen(userId: _userIdCode, userName: _userFullName),
+      ),
+    );
+    if (mounted) _fetchHistory();
+  }
+
+  Future<void> _flushSosQueue() async {
+    try {
+      await SosOfflineQueue().flush(_caseService);
+    } catch (_) {
+      // Không có mạng hoặc server chưa sẵn sàng; lần mở sau sẽ thử lại.
     }
   }
 
@@ -127,13 +167,19 @@ class _DashboardScreenState extends State<DashboardScreen>
       _speechEnabled = await _speechToText.initialize(
         onError: (error) {
           if (mounted) {
-            setState(() { _isListening = false; });
+            setState(() {
+              _isListening = false;
+            });
             _pulseController.stop();
           }
         },
         onStatus: (status) {
-          if ((status == 'done' || status == 'notListening') && mounted && _isListening) {
-            setState(() { _isListening = false; });
+          if ((status == 'done' || status == 'notListening') &&
+              mounted &&
+              _isListening) {
+            setState(() {
+              _isListening = false;
+            });
             _pulseController.stop();
           }
         },
@@ -146,6 +192,7 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   @override
   void dispose() {
+    _locationController.removeListener(_onLocationTextChanged);
     _reportController.dispose();
     _locationController.dispose();
     _pulseController.dispose();
@@ -164,21 +211,27 @@ class _DashboardScreenState extends State<DashboardScreen>
         if (mounted) {
           setState(() {
             _isRecordingAudio = false;
-            _uploadedFiles.add(UploadedFile(
-              name: name,
-              size: 'Audio webm',
-              isAudio: true,
-              blobUrl: blobUrl,
-            ));
+            _uploadedFiles.add(
+              UploadedFile(
+                name: name,
+                size: 'Audio webm',
+                isAudio: true,
+                blobUrl: blobUrl,
+              ),
+            );
           });
           _showSuccessSnack('Đã ghi âm và lưu file: $name');
         }
       });
       if (success) {
         setState(() => _isRecordingAudio = true);
-        _showInfoSnack('Đang ghi âm giọng nói... Bấm lại nút để dừng và lưu file.');
+        _showInfoSnack(
+          'Đang ghi âm giọng nói... Bấm lại nút để dừng và lưu file.',
+        );
       } else {
-        _showErrorSnack('Không thể truy cập Microphone. Vui lòng cấp quyền trong trình duyệt.');
+        _showErrorSnack(
+          'Không thể truy cập Microphone. Vui lòng cấp quyền trong trình duyệt.',
+        );
       }
     }
   }
@@ -186,16 +239,22 @@ class _DashboardScreenState extends State<DashboardScreen>
   // Speech-to-Text: Converts Voice directly real-time inside TextField
   Future<void> _toggleSTT() async {
     if (!_speechEnabled) {
-      _showErrorSnack('Trình duyệt không hỗ trợ Nhận dạng giọng nói (STT). Hãy dùng Google Chrome hoặc Microsoft Edge.');
+      _showErrorSnack(
+        'Trình duyệt không hỗ trợ Nhận dạng giọng nói (STT). Hãy dùng Google Chrome hoặc Microsoft Edge.',
+      );
       return;
     }
     if (_isListening) {
       await _speechToText.stop();
-      setState(() { _isListening = false; });
+      setState(() {
+        _isListening = false;
+      });
       _pulseController.stop();
     } else {
       _sttBaseText = _reportController.text;
-      setState(() { _isListening = true; });
+      setState(() {
+        _isListening = true;
+      });
       _pulseController.repeat(reverse: true);
       await _speechToText.listen(
         listenOptions: stt.SpeechListenOptions(
@@ -228,22 +287,39 @@ class _DashboardScreenState extends State<DashboardScreen>
   Future<void> _openMapPicker() async {
     final result = await showDialog<PickedLocation>(
       context: context,
-      builder: (ctx) => const LocationPickerDialog(),
+      builder: (ctx) => LocationPickerDialog(
+        userAgentPackageName: 'com.example.flutter_application_mobile',
+        apiBaseUrl: resolveApiBaseUrl(),
+        initial: _pickedLocation,
+      ),
     );
 
     if (result != null) {
       setState(() {
+        _pickedLocation = result;
+        _pickedDisplay = result.display;
         _locationController.text = result.display;
       });
       _showSuccessSnack('Đã chọn vị trí: ${result.display}');
     }
   }
 
+  void _onLocationTextChanged() {
+    if (_pickedLocation == null) return;
+    if (_locationController.text == _pickedDisplay) return;
+    _pickedLocation = null;
+    _pickedDisplay = null;
+  }
+
   // Camera Capture
   void _captureImage() {
     captureImageWeb((name, size, bytes) {
       if (mounted) {
-        setState(() => _uploadedFiles.add(UploadedFile(name: name, size: _formatBytes(size), bytes: bytes)));
+        setState(
+          () => _uploadedFiles.add(
+            UploadedFile(name: name, size: _formatBytes(size), bytes: bytes),
+          ),
+        );
         _showSuccessSnack('Đã thêm ảnh chụp: $name');
       }
     });
@@ -251,19 +327,24 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   // File Upload
   Future<void> _pickFiles() async {
-    final result = await FilePicker.platform.pickFiles(allowMultiple: true, type: FileType.any, withData: true);
-    if (result == null || result.files.isEmpty) return;
-    setState(() {
-      _uploadedFiles.addAll(
-        result.files.where((f) => f.name.isNotEmpty)
-            .map((f) => UploadedFile(
-              name: f.name,
-              size: _formatBytes(f.size),
-              bytes: f.bytes,
-              path: f.path,
-            )),
+    final picked = await FilePicker.pickFiles(type: FileType.any);
+    if (picked.isEmpty) return;
+
+    final files = <UploadedFile>[];
+    for (final file in picked.where((f) => f.name.isNotEmpty)) {
+      final bytes = await file.readAsBytes();
+      files.add(
+        UploadedFile(
+          name: file.name,
+          size: _formatBytes(file.lengthSync() ?? bytes.length),
+          bytes: bytes,
+          path: file.path,
+        ),
       );
-    });
+    }
+
+    if (!mounted || files.isEmpty) return;
+    setState(() => _uploadedFiles.addAll(files));
   }
 
   // Download (Web)
@@ -271,7 +352,9 @@ class _DashboardScreenState extends State<DashboardScreen>
     if (file.blobUrl != null) {
       downloadFileWeb(file.blobUrl, file.name);
     } else {
-      _showInfoSnack('"${file.name}" (${file.size}) - File đã được lưu trên máy chủ.');
+      _showInfoSnack(
+        '"${file.name}" (${file.size}) - File đã được lưu trên máy chủ.',
+      );
     }
   }
 
@@ -283,7 +366,8 @@ class _DashboardScreenState extends State<DashboardScreen>
   // Language dropdown
   void _showLanguageMenu(BuildContext ctx) {
     final rb = _langKey.currentContext!.findRenderObject() as RenderBox;
-    final overlay = Navigator.of(ctx).overlay!.context.findRenderObject() as RenderBox;
+    final overlay =
+        Navigator.of(ctx).overlay!.context.findRenderObject() as RenderBox;
     final pos = RelativeRect.fromRect(
       Rect.fromPoints(
         rb.localToGlobal(Offset.zero, ancestor: overlay),
@@ -292,44 +376,80 @@ class _DashboardScreenState extends State<DashboardScreen>
       Offset.zero & overlay.size,
     );
     showMenu<String>(
-      context: ctx, position: pos,
+      context: ctx,
+      position: pos,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
       elevation: 8,
       items: [
         _langMenuItem('vi', 'Tiếng Việt', _isVietnamese),
         _langMenuItem('en', 'English', !_isVietnamese),
       ],
-    ).then((val) { if (val != null) setState(() => _isVietnamese = val == 'vi'); });
+    ).then((val) {
+      if (val != null) setState(() => _isVietnamese = val == 'vi');
+    });
   }
 
   PopupMenuItem<String> _langMenuItem(String val, String label, bool selected) {
     return PopupMenuItem<String>(
       value: val,
-      child: Row(children: [
-        Text(val == 'vi' ? 'VI' : 'EN',
+      child: Row(
+        children: [
+          Text(
+            val == 'vi' ? 'VI' : 'EN',
             style: TextStyle(
-                fontWeight: FontWeight.w800, fontSize: 13,
-                color: selected ? const Color(0xFF0B6EDB) : const Color(0xFF8AA5C7))),
-        const SizedBox(width: 10),
-        Text(label, style: TextStyle(
-            fontWeight: selected ? FontWeight.w700 : FontWeight.w400,
-            color: selected ? const Color(0xFF0B6EDB) : const Color(0xFF0A2F5D))),
-        if (selected) ...[const Spacer(), const Icon(Icons.check_rounded, size: 16, color: Color(0xFF0B6EDB))],
-      ]),
+              fontWeight: FontWeight.w800,
+              fontSize: 13,
+              color: selected
+                  ? const Color(0xFF0B6EDB)
+                  : const Color(0xFF8AA5C7),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Text(
+            label,
+            style: TextStyle(
+              fontWeight: selected ? FontWeight.w700 : FontWeight.w400,
+              color: selected
+                  ? const Color(0xFF0B6EDB)
+                  : const Color(0xFF0A2F5D),
+            ),
+          ),
+          if (selected) ...[
+            const Spacer(),
+            const Icon(Icons.check_rounded, size: 16, color: Color(0xFF0B6EDB)),
+          ],
+        ],
+      ),
     );
   }
 
   // Notification popup
   void _showNotificationPopup(BuildContext ctx) {
     final notifs = [
-      _NotifItem(icon: Icons.check_circle_rounded, color: const Color(0xFF1AA06A), title: 'Báo cáo #1023 đã được phê duyệt', time: '10 phút trước'),
-      _NotifItem(icon: Icons.info_rounded, color: const Color(0xFF0B6EDB), title: 'Hệ thống bảo trì lúc 02:00 AM', time: '1 giờ trước'),
-      _NotifItem(icon: Icons.warning_amber_rounded, color: const Color(0xFFF77B32), title: 'Sự cố khu A cần xử lý ngay', time: 'Hôm qua'),
+      _NotifItem(
+        icon: Icons.check_circle_rounded,
+        color: const Color(0xFF1AA06A),
+        title: 'Báo cáo #1023 đã được phê duyệt',
+        time: '10 phút trước',
+      ),
+      _NotifItem(
+        icon: Icons.info_rounded,
+        color: const Color(0xFF0B6EDB),
+        title: 'Hệ thống bảo trì lúc 02:00 AM',
+        time: '1 giờ trước',
+      ),
+      _NotifItem(
+        icon: Icons.warning_amber_rounded,
+        color: const Color(0xFFF77B32),
+        title: 'Sự cố khu A cần xử lý ngay',
+        time: 'Hôm qua',
+      ),
     ];
 
     if (_notifKey.currentContext != null) {
       final rb = _notifKey.currentContext!.findRenderObject() as RenderBox;
-      final overlay = Navigator.of(ctx).overlay!.context.findRenderObject() as RenderBox;
+      final overlay =
+          Navigator.of(ctx).overlay!.context.findRenderObject() as RenderBox;
       final pos = RelativeRect.fromRect(
         Rect.fromPoints(
           rb.localToGlobal(Offset.zero, ancestor: overlay),
@@ -338,48 +458,112 @@ class _DashboardScreenState extends State<DashboardScreen>
         Offset.zero & overlay.size,
       );
       showMenu<void>(
-        context: ctx, position: pos,
+        context: ctx,
+        position: pos,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         constraints: const BoxConstraints(minWidth: 320, maxWidth: 360),
         elevation: 10,
         items: [
-          const PopupMenuItem<void>(enabled: false, height: 40,
-              child: Text('Thông báo', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: Color(0xFF0A2F5D)))),
-          const PopupMenuDivider(height: 1),
-          ...notifs.map((n) => PopupMenuItem<void>(
-            child: Padding(padding: const EdgeInsets.symmetric(vertical: 4),
-              child: Row(children: [
-                Container(width: 38, height: 38,
-                    decoration: BoxDecoration(color: n.color.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(10)),
-                    child: Icon(n.icon, color: n.color, size: 19)),
-                const SizedBox(width: 12),
-                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text(n.title, style: const TextStyle(fontSize: 13, color: Color(0xFF0A2F5D), fontWeight: FontWeight.w500)),
-                  const SizedBox(height: 2),
-                  Text(n.time, style: const TextStyle(fontSize: 11, color: Color(0xFF8AA5C7))),
-                ])),
-              ]),
+          const PopupMenuItem<void>(
+            enabled: false,
+            height: 40,
+            child: Text(
+              'Thông báo',
+              style: TextStyle(
+                fontWeight: FontWeight.w800,
+                fontSize: 15,
+                color: Color(0xFF0A2F5D),
+              ),
             ),
-          )),
+          ),
+          const PopupMenuDivider(height: 1),
+          ...notifs.map(
+            (n) => PopupMenuItem<void>(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 38,
+                      height: 38,
+                      decoration: BoxDecoration(
+                        color: n.color.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Icon(n.icon, color: n.color, size: 19),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            n.title,
+                            style: const TextStyle(
+                              fontSize: 13,
+                              color: Color(0xFF0A2F5D),
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            n.time,
+                            style: const TextStyle(
+                              fontSize: 11,
+                              color: Color(0xFF8AA5C7),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
         ],
       );
     } else {
       showDialog(
         context: ctx,
         builder: (dCtx) => AlertDialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-          title: const Text('Thông báo', style: TextStyle(fontWeight: FontWeight.w800, color: Color(0xFF0A2F5D))),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
+          title: const Text(
+            'Thông báo',
+            style: TextStyle(
+              fontWeight: FontWeight.w800,
+              color: Color(0xFF0A2F5D),
+            ),
+          ),
           content: Column(
             mainAxisSize: MainAxisSize.min,
-            children: notifs.map((n) => ListTile(
-              dense: true,
-              leading: Icon(n.icon, color: n.color),
-              title: Text(n.title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-              subtitle: Text(n.time, style: const TextStyle(fontSize: 11)),
-            )).toList(),
+            children: notifs
+                .map(
+                  (n) => ListTile(
+                    dense: true,
+                    leading: Icon(n.icon, color: n.color),
+                    title: Text(
+                      n.title,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    subtitle: Text(
+                      n.time,
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                  ),
+                )
+                .toList(),
           ),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(dCtx), child: const Text('Đóng')),
+            TextButton(
+              onPressed: () => Navigator.pop(dCtx),
+              child: const Text('Đóng'),
+            ),
           ],
         ),
       );
@@ -406,7 +590,9 @@ class _DashboardScreenState extends State<DashboardScreen>
       builder: (dCtx) => StatefulBuilder(
         builder: (dCtx, setDialogState) {
           return Dialog(
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(22),
+            ),
             child: Container(
               width: 520,
               padding: const EdgeInsets.all(22),
@@ -419,21 +605,43 @@ class _DashboardScreenState extends State<DashboardScreen>
                       children: [
                         CircleAvatar(
                           radius: 28,
-                          backgroundColor: const Color(0xFF0B6EDB).withValues(alpha: 0.12),
-                          child: const Icon(Icons.manage_accounts_rounded, color: Color(0xFF0B6EDB), size: 30),
+                          backgroundColor: const Color(
+                            0xFF0B6EDB,
+                          ).withValues(alpha: 0.12),
+                          child: const Icon(
+                            Icons.manage_accounts_rounded,
+                            color: Color(0xFF0B6EDB),
+                            size: 30,
+                          ),
                         ),
                         const SizedBox(width: 14),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Text('Tài khoản & Hồ sơ cá nhân', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Color(0xFF0A2F5D))),
-                              Text('Điều chỉnh thông tin Profile hoặc chuyển tài khoản', style: TextStyle(fontSize: 12, color: const Color(0xFF8AA5C7))),
+                              const Text(
+                                'Tài khoản & Hồ sơ cá nhân',
+                                style: TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w800,
+                                  color: Color(0xFF0A2F5D),
+                                ),
+                              ),
+                              Text(
+                                'Điều chỉnh thông tin Profile hoặc chuyển tài khoản',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: const Color(0xFF8AA5C7),
+                                ),
+                              ),
                             ],
                           ),
                         ),
                         IconButton(
-                          icon: const Icon(Icons.close_rounded, color: Color(0xFF8AA5C7)),
+                          icon: const Icon(
+                            Icons.close_rounded,
+                            color: Color(0xFF8AA5C7),
+                          ),
                           onPressed: () => Navigator.pop(dCtx),
                         ),
                       ],
@@ -443,7 +651,14 @@ class _DashboardScreenState extends State<DashboardScreen>
                     const SizedBox(height: 18),
 
                     // Quick Account Selector
-                    const Text('Chọn / Chuyển tài khoản nhanh', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Color(0xFF0A2F5D))),
+                    const Text(
+                      'Chọn / Chuyển tài khoản nhanh',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFF0A2F5D),
+                      ),
+                    ),
                     const SizedBox(height: 10),
                     Wrap(
                       spacing: 8,
@@ -496,23 +711,43 @@ class _DashboardScreenState extends State<DashboardScreen>
                     const SizedBox(height: 20),
 
                     // Profile Edit Form
-                    const Text('Chỉnh sửa thông tin Hồ sơ', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Color(0xFF0A2F5D))),
+                    const Text(
+                      'Chỉnh sửa thông tin Hồ sơ',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFF0A2F5D),
+                      ),
+                    ),
                     const SizedBox(height: 12),
                     TextField(
                       controller: nameCtrl,
                       decoration: InputDecoration(
                         labelText: 'Họ và tên',
                         prefixIcon: const Icon(Icons.person_outline_rounded),
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 12,
+                        ),
                       ),
                     ),
                     const SizedBox(height: 12),
                     TextField(
                       controller: emailCtrl,
-                      decoration: InputDecoration(labelText: 'Email', prefixIcon: const Icon(Icons.email_outlined),
-                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12)),
+                      decoration: InputDecoration(
+                        labelText: 'Email',
+                        prefixIcon: const Icon(Icons.email_outlined),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 12,
+                        ),
+                      ),
                     ),
                     const SizedBox(height: 12),
                     Row(
@@ -520,18 +755,34 @@ class _DashboardScreenState extends State<DashboardScreen>
                         Expanded(
                           child: TextField(
                             controller: idCtrl,
-                            decoration: InputDecoration(labelText: 'MSSV / Mã cán bộ', prefixIcon: const Icon(Icons.badge_outlined),
-                                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                                contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12)),
+                            decoration: InputDecoration(
+                              labelText: 'MSSV / Mã cán bộ',
+                              prefixIcon: const Icon(Icons.badge_outlined),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 12,
+                              ),
+                            ),
                           ),
                         ),
                         const SizedBox(width: 12),
                         Expanded(
                           child: TextField(
                             controller: deptCtrl,
-                            decoration: InputDecoration(labelText: 'Khoa / Đơn vị', prefixIcon: const Icon(Icons.school_outlined),
-                                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                                contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12)),
+                            decoration: InputDecoration(
+                              labelText: 'Khoa / Đơn vị',
+                              prefixIcon: const Icon(Icons.school_outlined),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 12,
+                              ),
+                            ),
                           ),
                         ),
                       ],
@@ -553,7 +804,9 @@ class _DashboardScreenState extends State<DashboardScreen>
                               foregroundColor: const Color(0xFFCF3C3C),
                               side: const BorderSide(color: Color(0xFFCF3C3C)),
                               padding: const EdgeInsets.symmetric(vertical: 14),
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
                             ),
                           ),
                         ),
@@ -568,7 +821,9 @@ class _DashboardScreenState extends State<DashboardScreen>
                                 _userDepartment = deptCtrl.text.trim();
                               });
                               Navigator.pop(dCtx);
-                              _showSuccessSnack('Đã cập nhật thông tin Hồ sơ thành công!');
+                              _showSuccessSnack(
+                                'Đã cập nhật thông tin Hồ sơ thành công!',
+                              );
                             },
                             icon: const Icon(Icons.save_rounded, size: 18),
                             label: const Text('Lưu thay đổi'),
@@ -576,7 +831,9 @@ class _DashboardScreenState extends State<DashboardScreen>
                               backgroundColor: const Color(0xFF0B6EDB),
                               foregroundColor: Colors.white,
                               padding: const EdgeInsets.symmetric(vertical: 14),
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
                             ),
                           ),
                         ),
@@ -610,21 +867,48 @@ class _DashboardScreenState extends State<DashboardScreen>
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
-          color: selected ? const Color(0xFF0B6EDB).withValues(alpha: 0.12) : const Color(0xFFF4F8FF),
+          color: selected
+              ? const Color(0xFF0B6EDB).withValues(alpha: 0.12)
+              : const Color(0xFFF4F8FF),
           borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: selected ? const Color(0xFF0B6EDB) : const Color(0xFFE3ECFF), width: selected ? 1.5 : 1.0),
+          border: Border.all(
+            color: selected ? const Color(0xFF0B6EDB) : const Color(0xFFE3ECFF),
+            width: selected ? 1.5 : 1.0,
+          ),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(selected ? Icons.check_circle_rounded : Icons.account_circle_outlined,
-                size: 16, color: selected ? const Color(0xFF0B6EDB) : const Color(0xFF8AA5C7)),
+            Icon(
+              selected
+                  ? Icons.check_circle_rounded
+                  : Icons.account_circle_outlined,
+              size: 16,
+              color: selected
+                  ? const Color(0xFF0B6EDB)
+                  : const Color(0xFF8AA5C7),
+            ),
             const SizedBox(width: 6),
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: selected ? const Color(0xFF0B6EDB) : const Color(0xFF0A2F5D))),
-                Text(subtitle, style: const TextStyle(fontSize: 10, color: Color(0xFF8AA5C7))),
+                Text(
+                  title,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: selected
+                        ? const Color(0xFF0B6EDB)
+                        : const Color(0xFF0A2F5D),
+                  ),
+                ),
+                Text(
+                  subtitle,
+                  style: const TextStyle(
+                    fontSize: 10,
+                    color: Color(0xFF8AA5C7),
+                  ),
+                ),
               ],
             ),
           ],
@@ -659,14 +943,16 @@ class _DashboardScreenState extends State<DashboardScreen>
         if (bytes == null || bytes.isEmpty) {
           bytes = Uint8List.fromList('File content: ${f.name}'.codeUnits);
         }
-        processedFiles.add(UploadedFile(
-          name: f.name,
-          size: f.size,
-          bytes: bytes,
-          path: f.path,
-          isAudio: f.isAudio,
-          blobUrl: f.blobUrl,
-        ));
+        processedFiles.add(
+          UploadedFile(
+            name: f.name,
+            size: f.size,
+            bytes: bytes,
+            path: f.path,
+            isAudio: f.isAudio,
+            blobUrl: f.blobUrl,
+          ),
+        );
       }
 
       final createdCase = await _caseService.submitReport(
@@ -675,6 +961,8 @@ class _DashboardScreenState extends State<DashboardScreen>
         reportType: 'Report',
         priority: 'Normal',
         userId: _userIdCode,
+        latitude: _pickedLocation?.latitude,
+        longitude: _pickedLocation?.longitude,
         files: processedFiles,
       );
 
@@ -687,20 +975,47 @@ class _DashboardScreenState extends State<DashboardScreen>
       _fetchHistory();
 
       if (!mounted) return;
-      showDialog(context: context, builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-        title: const Row(children: [
-          Icon(Icons.check_circle_rounded, color: Color(0xFF1AA06A), size: 26),
-          SizedBox(width: 10),
-          Text('Gửi báo cáo thành công!', style: TextStyle(fontWeight: FontWeight.w800, color: Color(0xFF0A2F5D))),
-        ]),
-        content: Text('Báo cáo #${createdCase.id} đã được lưu vào Database PostgreSQL với ${createdCase.evidences.length} tệp đính kèm.'),
-        actions: [ElevatedButton(
-          onPressed: () => Navigator.pop(ctx),
-          style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0B6EDB), foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
-          child: const Text('OK'))],
-      ));
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
+          title: const Row(
+            children: [
+              Icon(
+                Icons.check_circle_rounded,
+                color: Color(0xFF1AA06A),
+                size: 26,
+              ),
+              SizedBox(width: 10),
+              Text(
+                'Gửi báo cáo thành công!',
+                style: TextStyle(
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFF0A2F5D),
+                ),
+              ),
+            ],
+          ),
+          content: Text(
+            'Báo cáo #${createdCase.id} đã được lưu vào Database PostgreSQL với ${createdCase.evidences.length} tệp đính kèm.',
+          ),
+          actions: [
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF0B6EDB),
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
     } catch (e) {
       setState(() => _isSubmitting = false);
       _showErrorSnack('Lỗi khi gửi báo cáo: $e');
@@ -710,8 +1025,8 @@ class _DashboardScreenState extends State<DashboardScreen>
   Future<void> _submitSos() async {
     setState(() => _isSubmitting = true);
     try {
-      final desc = _reportController.text.trim().isNotEmpty 
-          ? _reportController.text.trim() 
+      final desc = _reportController.text.trim().isNotEmpty
+          ? _reportController.text.trim()
           : 'Yêu cầu cấp cứu / KHẨN CẤP (SOS)';
       final location = _locationController.text.trim();
 
@@ -721,6 +1036,8 @@ class _DashboardScreenState extends State<DashboardScreen>
         reportType: 'SOS',
         priority: 'High',
         userId: _userIdCode,
+        latitude: _pickedLocation?.latitude,
+        longitude: _pickedLocation?.longitude,
       );
 
       setState(() {
@@ -730,20 +1047,47 @@ class _DashboardScreenState extends State<DashboardScreen>
       _fetchHistory();
 
       if (!mounted) return;
-      showDialog(context: context, builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-        title: const Row(children: [
-          Icon(Icons.warning_amber_rounded, color: Color(0xFFCF3C3C), size: 26),
-          SizedBox(width: 10),
-          Text('SOS đã được gửi!', style: TextStyle(color: Color(0xFFCF3C3C), fontWeight: FontWeight.w800)),
-        ]),
-        content: Text('Yêu cầu khẩn cấp #${createdCase.id} đã được gửi và lưu vào Database PostgreSQL.'),
-        actions: [ElevatedButton(
-          onPressed: () => Navigator.pop(ctx),
-          style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFCF3C3C), foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
-          child: const Text('OK'))],
-      ));
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
+          title: const Row(
+            children: [
+              Icon(
+                Icons.warning_amber_rounded,
+                color: Color(0xFFCF3C3C),
+                size: 26,
+              ),
+              SizedBox(width: 10),
+              Text(
+                'SOS đã được gửi!',
+                style: TextStyle(
+                  color: Color(0xFFCF3C3C),
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
+          ),
+          content: Text(
+            'Yêu cầu khẩn cấp #${createdCase.id} đã được gửi và lưu vào Database PostgreSQL.',
+          ),
+          actions: [
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFCF3C3C),
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
     } catch (e) {
       setState(() => _isSubmitting = false);
       _showErrorSnack('Lỗi khi gửi SOS: $e');
@@ -754,17 +1098,33 @@ class _DashboardScreenState extends State<DashboardScreen>
   String _formatBytes(int bytes) {
     if (bytes <= 0) return '0 KB';
     const u = ['B', 'KB', 'MB', 'GB'];
-    var s = bytes.toDouble(); var i = 0;
-    while (s >= 1024 && i < u.length - 1) { s /= 1024; i++; }
+    var s = bytes.toDouble();
+    var i = 0;
+    while (s >= 1024 && i < u.length - 1) {
+      s /= 1024;
+      i++;
+    }
     return '${s.toStringAsFixed(s >= 10 || i == 0 ? 0 : 1)} ${u[i]}';
   }
 
   void _showErrorSnack(String m) => ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(m), behavior: SnackBarBehavior.floating, backgroundColor: const Color(0xFFCF3C3C)));
-  void _showSuccessSnack(String m) => ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(m), behavior: SnackBarBehavior.floating, backgroundColor: const Color(0xFF1AA06A)));
+    SnackBar(
+      content: Text(m),
+      behavior: SnackBarBehavior.floating,
+      backgroundColor: const Color(0xFFCF3C3C),
+    ),
+  );
+  void _showSuccessSnack(String m) =>
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(m),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: const Color(0xFF1AA06A),
+        ),
+      );
   void _showInfoSnack(String m) => ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(m), behavior: SnackBarBehavior.floating));
+    SnackBar(content: Text(m), behavior: SnackBarBehavior.floating),
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -782,12 +1142,19 @@ class _DashboardScreenState extends State<DashboardScreen>
               elevation: 2,
               title: Row(
                 children: [
-                  const Icon(Icons.school_rounded, color: Colors.white, size: 24),
+                  const Icon(
+                    Icons.school_rounded,
+                    color: Colors.white,
+                    size: 24,
+                  ),
                   const SizedBox(width: 8),
                   const Expanded(
                     child: Text(
                       'UEL Support Center',
-                      style: TextStyle(fontWeight: FontWeight.w800, fontSize: 17),
+                      style: TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 17,
+                      ),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
@@ -795,7 +1162,11 @@ class _DashboardScreenState extends State<DashboardScreen>
               ),
               actions: [
                 IconButton(
-                  icon: const Icon(Icons.notifications_active_rounded, color: Colors.white, size: 20),
+                  icon: const Icon(
+                    Icons.notifications_active_rounded,
+                    color: Colors.white,
+                    size: 20,
+                  ),
                   tooltip: 'Thông báo',
                   onPressed: () => _showNotificationPopup(context),
                 ),
@@ -808,7 +1179,11 @@ class _DashboardScreenState extends State<DashboardScreen>
                       backgroundColor: Colors.white,
                       child: Text(
                         _userFullName.isNotEmpty ? _userFullName[0] : 'H',
-                        style: const TextStyle(color: Color(0xFF0B3B7A), fontWeight: FontWeight.w800, fontSize: 14),
+                        style: const TextStyle(
+                          color: Color(0xFF0B3B7A),
+                          fontWeight: FontWeight.w800,
+                          fontSize: 14,
+                        ),
                       ),
                     ),
                   ),
@@ -822,6 +1197,10 @@ class _DashboardScreenState extends State<DashboardScreen>
             bottomNavigationBar: NavigationBar(
               selectedIndex: _selectedIndex.clamp(0, 2),
               onDestinationSelected: (index) {
+                if (index == 1) {
+                  _openSos();
+                  return;
+                }
                 setState(() => _selectedIndex = index);
                 if (index == 2) _fetchHistory();
               },
@@ -831,17 +1210,26 @@ class _DashboardScreenState extends State<DashboardScreen>
               destinations: const [
                 NavigationDestination(
                   icon: Icon(Icons.report_problem_outlined),
-                  selectedIcon: Icon(Icons.report_problem_rounded, color: Color(0xFF0B6EDB)),
+                  selectedIcon: Icon(
+                    Icons.report_problem_rounded,
+                    color: Color(0xFF0B6EDB),
+                  ),
                   label: 'Báo cáo',
                 ),
                 NavigationDestination(
                   icon: Icon(Icons.sos_outlined),
-                  selectedIcon: Icon(Icons.sos_rounded, color: Color(0xFFCF3C3C)),
+                  selectedIcon: Icon(
+                    Icons.sos_rounded,
+                    color: Color(0xFFCF3C3C),
+                  ),
                   label: 'SOS Khẩn cấp',
                 ),
                 NavigationDestination(
                   icon: Icon(Icons.history_edu_outlined),
-                  selectedIcon: Icon(Icons.history_edu_rounded, color: Color(0xFF0B6EDB)),
+                  selectedIcon: Icon(
+                    Icons.history_edu_rounded,
+                    color: Color(0xFF0B6EDB),
+                  ),
                   label: 'Lịch sử',
                 ),
               ],
@@ -905,32 +1293,70 @@ class _DashboardScreenState extends State<DashboardScreen>
               color: Colors.white,
               borderRadius: BorderRadius.circular(12),
             ),
-            child: const Icon(Icons.school_rounded, color: Color(0xFF0B3B7A), size: 26),
+            child: const Icon(
+              Icons.school_rounded,
+              color: Color(0xFF0B3B7A),
+              size: 26,
+            ),
           ),
           const SizedBox(width: 12),
-          Expanded(child: Text('Trường Đại học Kinh tế - Luật',
-              style: theme.textTheme.titleMedium?.copyWith(color: Colors.white, fontWeight: FontWeight.w700),
-              overflow: TextOverflow.ellipsis)),
+          Expanded(
+            child: Text(
+              'Trường Đại học Kinh tế - Luật',
+              style: theme.textTheme.titleMedium?.copyWith(
+                color: Colors.white,
+                fontWeight: FontWeight.w700,
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
           const SizedBox(width: 10),
-          Flexible(child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(children: [
-              _HeaderAction(label: 'Tải app Mobile', icon: Icons.smartphone_rounded, onTap: () {}),
-              const SizedBox(width: 8),
-              _HeaderAction(key: _langKey, label: _isVietnamese ? 'Tiếng Việt' : 'English',
-                  icon: Icons.language_rounded, onTap: () => _showLanguageMenu(context)),
-              const SizedBox(width: 8),
-              _HeaderAction(key: _notifKey, label: 'Thông báo', icon: _hasNotification
-                  ? Icons.notifications_active_rounded : Icons.notifications_none_rounded,
-                  badge: _hasNotification ? '3' : null, onTap: () => _showNotificationPopup(context)),
-              const SizedBox(width: 8),
-              _HeaderAction(label: 'Hướng dẫn', icon: Icons.help_outline_rounded, onTap: () {}),
-              const SizedBox(width: 8),
-              _HeaderAction(label: _isLoggedIn ? _userFullName : 'Đăng nhập',
-                  icon: _isLoggedIn ? Icons.account_circle_rounded : Icons.login_rounded,
-                  onTap: () => _showAccountPopup(context), highlight: _isLoggedIn),
-            ]),
-          )),
+          Flexible(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  _HeaderAction(
+                    label: 'Tải app Mobile',
+                    icon: Icons.smartphone_rounded,
+                    onTap: () {},
+                  ),
+                  const SizedBox(width: 8),
+                  _HeaderAction(
+                    key: _langKey,
+                    label: _isVietnamese ? 'Tiếng Việt' : 'English',
+                    icon: Icons.language_rounded,
+                    onTap: () => _showLanguageMenu(context),
+                  ),
+                  const SizedBox(width: 8),
+                  _HeaderAction(
+                    key: _notifKey,
+                    label: 'Thông báo',
+                    icon: _hasNotification
+                        ? Icons.notifications_active_rounded
+                        : Icons.notifications_none_rounded,
+                    badge: _hasNotification ? '3' : null,
+                    onTap: () => _showNotificationPopup(context),
+                  ),
+                  const SizedBox(width: 8),
+                  _HeaderAction(
+                    label: 'Hướng dẫn',
+                    icon: Icons.help_outline_rounded,
+                    onTap: () {},
+                  ),
+                  const SizedBox(width: 8),
+                  _HeaderAction(
+                    label: _isLoggedIn ? _userFullName : 'Đăng nhập',
+                    icon: _isLoggedIn
+                        ? Icons.account_circle_rounded
+                        : Icons.login_rounded,
+                    onTap: () => _showAccountPopup(context),
+                    highlight: _isLoggedIn,
+                  ),
+                ],
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -939,206 +1365,450 @@ class _DashboardScreenState extends State<DashboardScreen>
   Widget _buildSidebar() {
     return Container(
       width: 360,
-      decoration: const BoxDecoration(gradient: LinearGradient(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
           colors: [Color(0xFF0D4D8A), Color(0xFF103F75)],
-          begin: Alignment.topCenter, end: Alignment.bottomCenter)),
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+        ),
+      ),
       child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 18, 16, 18),
-        child: Column(children: [
-          const CircleAvatar(radius: 36, backgroundColor: Colors.white,
-              child: Icon(Icons.person_rounded, size: 42, color: Color(0xFF0B3B7A))),
-          const SizedBox(height: 10),
-          Text(_userFullName,
-              style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.w700), textAlign: TextAlign.center),
-          const SizedBox(height: 4),
-          Text('$_userRole • $_userDepartment',
-              style: const TextStyle(color: Colors.white70, fontSize: 12), textAlign: TextAlign.center),
-          const SizedBox(height: 18),
-          Expanded(child: ListView.builder(
-            padding: EdgeInsets.zero, itemCount: _items.length,
-            itemBuilder: (ctx, index) {
-              final item = _items[index];
-              final selected = _selectedIndex == index;
-              final hovered = _hoveredIndex == index;
-              return MouseRegion(
-                onEnter: (_) => setState(() => _hoveredIndex = index),
-                onExit: (_) => setState(() => _hoveredIndex = null),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 200), curve: Curves.easeInOut,
-                  margin: const EdgeInsets.only(bottom: 12),
-                  padding: EdgeInsets.symmetric(horizontal: selected ? 16.0 : 14.0, vertical: selected ? 16.0 : 12.0),
-                  decoration: BoxDecoration(
-                    color: selected ? Colors.white : hovered ? Colors.white.withValues(alpha: 0.08) : Colors.transparent,
-                    borderRadius: BorderRadius.circular(16),
-                    boxShadow: selected ? [BoxShadow(color: Colors.black.withValues(alpha: 0.08), blurRadius: 12, offset: const Offset(0, 4))] : null,
-                  ),
-                  child: Material(color: Colors.transparent,
-                    child: InkWell(borderRadius: BorderRadius.circular(16),
-                      onTap: () {
-                        setState(() => _selectedIndex = index);
-                        if (index == 2) _fetchHistory();
-                      },
-                      child: Row(children: [
-                        const SizedBox(width: 12),
-                        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                          Text(item.title, style: TextStyle(
-                              color: selected ? const Color(0xFF0B3B7A) : Colors.white,
-                              fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
-                              fontSize: selected ? 20 : 17)),
-                          const SizedBox(height: 3),
-                          Text(item.subtitle, style: TextStyle(
-                              color: selected ? const Color(0xFF4A7CC5) : Colors.white70, fontSize: 12)),
-                        ])),
-                        if (selected) const Icon(Icons.chevron_right_rounded, color: Color(0xFF0B3B7A), size: 24),
-                      ]),
+        child: Column(
+          children: [
+            const CircleAvatar(
+              radius: 36,
+              backgroundColor: Colors.white,
+              child: Icon(
+                Icons.person_rounded,
+                size: 42,
+                color: Color(0xFF0B3B7A),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              _userFullName,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 24,
+                fontWeight: FontWeight.w700,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '$_userRole • $_userDepartment',
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 18),
+            Expanded(
+              child: ListView.builder(
+                padding: EdgeInsets.zero,
+                itemCount: _items.length,
+                itemBuilder: (ctx, index) {
+                  final item = _items[index];
+                  final selected = _selectedIndex == index;
+                  final hovered = _hoveredIndex == index;
+                  return MouseRegion(
+                    onEnter: (_) => setState(() => _hoveredIndex = index),
+                    onExit: (_) => setState(() => _hoveredIndex = null),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      curve: Curves.easeInOut,
+                      margin: const EdgeInsets.only(bottom: 12),
+                      padding: EdgeInsets.symmetric(
+                        horizontal: selected ? 16.0 : 14.0,
+                        vertical: selected ? 16.0 : 12.0,
+                      ),
+                      decoration: BoxDecoration(
+                        color: selected
+                            ? Colors.white
+                            : hovered
+                            ? Colors.white.withValues(alpha: 0.08)
+                            : Colors.transparent,
+                        borderRadius: BorderRadius.circular(16),
+                        boxShadow: selected
+                            ? [
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: 0.08),
+                                  blurRadius: 12,
+                                  offset: const Offset(0, 4),
+                                ),
+                              ]
+                            : null,
+                      ),
+                      child: Material(
+                        color: Colors.transparent,
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(16),
+                          onTap: () {
+                            if (index == 1) {
+                              _openSos();
+                              return;
+                            }
+                            setState(() => _selectedIndex = index);
+                            if (index == 2) _fetchHistory();
+                          },
+                          child: Row(
+                            children: [
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      item.title,
+                                      style: TextStyle(
+                                        color: selected
+                                            ? const Color(0xFF0B3B7A)
+                                            : Colors.white,
+                                        fontWeight: selected
+                                            ? FontWeight.w800
+                                            : FontWeight.w600,
+                                        fontSize: selected ? 20 : 17,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 3),
+                                    Text(
+                                      item.subtitle,
+                                      style: TextStyle(
+                                        color: selected
+                                            ? const Color(0xFF4A7CC5)
+                                            : Colors.white70,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              if (selected)
+                                const Icon(
+                                  Icons.chevron_right_rounded,
+                                  color: Color(0xFF0B3B7A),
+                                  size: 24,
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
                     ),
-                  ),
-                ),
-              );
-            },
-          )),
-        ]),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 
   Widget _buildMainPanel() {
     final titles = ['Báo cáo', 'SOS Khẩn cấp', 'Xem báo cáo cũ'];
-    final body = switch (_selectedIndex) { 1 => _buildSosPanel(), 2 => _buildHistoryPanel(), _ => _buildReportPanel() };
+    final body = switch (_selectedIndex) {
+      1 => _buildSosPanel(),
+      2 => _buildHistoryPanel(),
+      _ => _buildReportPanel(),
+    };
     return Container(
       width: double.infinity,
-      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(22),
-          boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 18, offset: const Offset(0, 4))]),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        Container(
-          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
-          decoration: const BoxDecoration(color: Color(0xFF0D4D8A), borderRadius: BorderRadius.vertical(top: Radius.circular(22))),
-          child: Text(titles[_selectedIndex.clamp(0, 2)], textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w800)),
-        ),
-        body,
-      ]),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.04),
+            blurRadius: 18,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+            decoration: const BoxDecoration(
+              color: Color(0xFF0D4D8A),
+              borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+            ),
+            child: Text(
+              titles[_selectedIndex.clamp(0, 2)],
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
+          body,
+        ],
+      ),
     );
   }
 
   Widget _buildReportPanel() {
     return Padding(
       padding: const EdgeInsets.all(12),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        const SizedBox(height: 4),
-        LayoutBuilder(
-          builder: (context, c) {
-            final isSmall = c.maxWidth < 450;
-            if (isSmall) {
-              return Column(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const SizedBox(height: 4),
+          LayoutBuilder(
+            builder: (context, c) {
+              final isSmall = c.maxWidth < 450;
+              if (isSmall) {
+                return Column(
+                  children: [
+                    _AudioRecordCard(
+                      isRecording: _isRecordingAudio,
+                      onTap: _toggleAudioRecording,
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _ReportOptionCard(
+                            title: 'Tải file lên',
+                            icon: Icons.upload_file_rounded,
+                            color: const Color(0xFF0B6EDB),
+                            onTap: _pickFiles,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: _ReportOptionCard(
+                            title: 'Chụp hình',
+                            icon: Icons.camera_alt_rounded,
+                            color: const Color(0xFF1AA06A),
+                            onTap: _captureImage,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                );
+              }
+              return Row(
                 children: [
-                  _AudioRecordCard(isRecording: _isRecordingAudio, onTap: _toggleAudioRecording),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      Expanded(child: _ReportOptionCard(title: 'Tải file lên', icon: Icons.upload_file_rounded, color: const Color(0xFF0B6EDB), onTap: _pickFiles)),
-                      const SizedBox(width: 10),
-                      Expanded(child: _ReportOptionCard(title: 'Chụp hình', icon: Icons.camera_alt_rounded, color: const Color(0xFF1AA06A), onTap: _captureImage)),
-                    ],
+                  Expanded(
+                    child: _AudioRecordCard(
+                      isRecording: _isRecordingAudio,
+                      onTap: _toggleAudioRecording,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _ReportOptionCard(
+                      title: 'Tải file lên',
+                      icon: Icons.upload_file_rounded,
+                      color: const Color(0xFF0B6EDB),
+                      onTap: _pickFiles,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _ReportOptionCard(
+                      title: 'Chụp hình',
+                      icon: Icons.camera_alt_rounded,
+                      color: const Color(0xFF1AA06A),
+                      onTap: _captureImage,
+                    ),
                   ),
                 ],
               );
-            }
-            return Row(
-              children: [
-                Expanded(child: _AudioRecordCard(isRecording: _isRecordingAudio, onTap: _toggleAudioRecording)),
-                const SizedBox(width: 12),
-                Expanded(child: _ReportOptionCard(title: 'Tải file lên', icon: Icons.upload_file_rounded, color: const Color(0xFF0B6EDB), onTap: _pickFiles)),
-                const SizedBox(width: 12),
-                Expanded(child: _ReportOptionCard(title: 'Chụp hình', icon: Icons.camera_alt_rounded, color: const Color(0xFF1AA06A), onTap: _captureImage)),
-              ],
-            );
-          },
-        ),
-        const SizedBox(height: 14),
-        Container(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(color: const Color(0xFFF4F8FF), borderRadius: BorderRadius.circular(18),
-              border: Border.all(color: const Color(0xFFDBE7FF))),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Text('Vị trí / Địa điểm', style: TextStyle(color: Color(0xFF0A2F5D), fontSize: 15, fontWeight: FontWeight.w700)),
-            const SizedBox(height: 8),
-            TextField(
-              controller: _locationController,
-              style: const TextStyle(color: Color(0xFF0A2F5D), fontSize: 14),
-              decoration: InputDecoration(
-                filled: true,
-                fillColor: Colors.white,
-                prefixIcon: IconButton(
-                  tooltip: 'Mở bản đồ chọn vị trí (Map Picker)',
-                  icon: const Icon(Icons.location_on_rounded, color: Color(0xFF0B6EDB)),
-                  onPressed: _openMapPicker,
-                ),
-                suffixIcon: IconButton(
-                  tooltip: 'Mở bản đồ',
-                  icon: const Icon(Icons.map_rounded, color: Color(0xFF0B6EDB), size: 20),
-                  onPressed: _openMapPicker,
-                ),
-                hintText: 'Nhập hoặc bấm biểu tượng vị trí để chọn trên bản đồ...',
-                hintStyle: const TextStyle(color: Color(0xFF8AA5C7), fontSize: 13),
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFFE3ECFF))),
-                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFFE3ECFF))),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-              ),
+            },
+          ),
+          const SizedBox(height: 14),
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF4F8FF),
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: const Color(0xFFDBE7FF)),
             ),
-            const SizedBox(height: 14),
-            Row(children: [
-              const Text('Nội dung báo cáo', style: TextStyle(color: Color(0xFF0A2F5D), fontSize: 16, fontWeight: FontWeight.w700)),
-              if (_isListening) ...[
-                const SizedBox(width: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(color: const Color(0xFFFF3B30).withValues(alpha: 0.1), borderRadius: BorderRadius.circular(8)),
-                  child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                    Icon(Icons.fiber_manual_record, color: Color(0xFFFF3B30), size: 8),
-                    SizedBox(width: 4),
-                    Text('Đang nghe...', style: TextStyle(color: Color(0xFFFF3B30), fontSize: 11, fontWeight: FontWeight.w600)),
-                  ]),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Vị trí / Địa điểm',
+                  style: TextStyle(
+                    color: Color(0xFF0A2F5D),
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
-              ],
-            ]),
-            const SizedBox(height: 10),
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
-              decoration: BoxDecoration(
-                color: Colors.white, borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: _isListening ? const Color(0xFFFF3B30).withValues(alpha: 0.5) : const Color(0xFFE3ECFF),
-                    width: _isListening ? 1.5 : 1.0),
-                boxShadow: _isListening ? [BoxShadow(color: const Color(0xFFFF3B30).withValues(alpha: 0.08), blurRadius: 8)] : null,
-              ),
-              child: TextField(
-                controller: _reportController, maxLines: 8, minLines: 5,
-                style: const TextStyle(color: Color(0xFF53709F), fontSize: 14, height: 1.5),
-                decoration: InputDecoration(
-                  border: InputBorder.none,
-                  contentPadding: const EdgeInsets.fromLTRB(12, 12, 8, 12),
-                  hintText: 'Mô tả sự việc, thời gian, địa điểm... Hoặc bấm icon [Micro] ở góc dưới để nói nhập văn bản',
-                  hintStyle: const TextStyle(color: Color(0xFF8AA5C7), fontSize: 14, height: 1.5),
-                  suffixIcon: Align(
-                    alignment: Alignment.bottomCenter, widthFactor: 1.0, heightFactor: 1.0,
-                    child: Padding(
-                      padding: const EdgeInsets.only(bottom: 6, right: 4),
-                      child: ScaleTransition(
-                        scale: _isListening ? _pulseAnimation : const AlwaysStoppedAnimation(1.0),
-                        child: Tooltip(
-                          message: _isListening ? 'Dừng nhận dạng giọng nói' : 'Nhận dạng giọng nói (STT)',
-                          child: Material(
-                            color: _isListening ? const Color(0xFFFF3B30).withValues(alpha: 0.1) : Colors.transparent,
-                            borderRadius: BorderRadius.circular(10),
-                            child: InkWell(
-                              borderRadius: BorderRadius.circular(10),
-                              onTap: _toggleSTT,
-                              child: Padding(
-                                padding: const EdgeInsets.all(8),
-                                child: Icon(
-                                  _isListening ? Icons.stop_rounded : Icons.mic_rounded,
-                                  color: _isListening ? const Color(0xFFFF3B30) : const Color(0xFFAEC6E8),
-                                  size: 22,
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _locationController,
+                  style: const TextStyle(
+                    color: Color(0xFF0A2F5D),
+                    fontSize: 14,
+                  ),
+                  decoration: InputDecoration(
+                    filled: true,
+                    fillColor: Colors.white,
+                    prefixIcon: IconButton(
+                      tooltip: 'Mở bản đồ chọn vị trí (Map Picker)',
+                      icon: const Icon(
+                        Icons.location_on_rounded,
+                        color: Color(0xFF0B6EDB),
+                      ),
+                      onPressed: _openMapPicker,
+                    ),
+                    suffixIcon: IconButton(
+                      tooltip: 'Mở bản đồ',
+                      icon: const Icon(
+                        Icons.map_rounded,
+                        color: Color(0xFF0B6EDB),
+                        size: 20,
+                      ),
+                      onPressed: _openMapPicker,
+                    ),
+                    hintText:
+                        'Nhập hoặc bấm biểu tượng vị trí để chọn trên bản đồ...',
+                    hintStyle: const TextStyle(
+                      color: Color(0xFF8AA5C7),
+                      fontSize: 13,
+                    ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(color: Color(0xFFE3ECFF)),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(color: Color(0xFFE3ECFF)),
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 11,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    const Text(
+                      'Nội dung báo cáo',
+                      style: TextStyle(
+                        color: Color(0xFF0A2F5D),
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    if (_isListening) ...[
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 3,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFF3B30).withValues(alpha: 0.1),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.fiber_manual_record,
+                              color: Color(0xFFFF3B30),
+                              size: 8,
+                            ),
+                            SizedBox(width: 4),
+                            Text(
+                              'Đang nghe...',
+                              style: TextStyle(
+                                color: Color(0xFFFF3B30),
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 10),
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: _isListening
+                          ? const Color(0xFFFF3B30).withValues(alpha: 0.5)
+                          : const Color(0xFFE3ECFF),
+                      width: _isListening ? 1.5 : 1.0,
+                    ),
+                    boxShadow: _isListening
+                        ? [
+                            BoxShadow(
+                              color: const Color(
+                                0xFFFF3B30,
+                              ).withValues(alpha: 0.08),
+                              blurRadius: 8,
+                            ),
+                          ]
+                        : null,
+                  ),
+                  child: TextField(
+                    controller: _reportController,
+                    maxLines: 8,
+                    minLines: 5,
+                    style: const TextStyle(
+                      color: Color(0xFF53709F),
+                      fontSize: 14,
+                      height: 1.5,
+                    ),
+                    decoration: InputDecoration(
+                      border: InputBorder.none,
+                      contentPadding: const EdgeInsets.fromLTRB(12, 12, 8, 12),
+                      hintText:
+                          'Mô tả sự việc, thời gian, địa điểm... Hoặc bấm icon [Micro] ở góc dưới để nói nhập văn bản',
+                      hintStyle: const TextStyle(
+                        color: Color(0xFF8AA5C7),
+                        fontSize: 14,
+                        height: 1.5,
+                      ),
+                      suffixIcon: Align(
+                        alignment: Alignment.bottomCenter,
+                        widthFactor: 1.0,
+                        heightFactor: 1.0,
+                        child: Padding(
+                          padding: const EdgeInsets.only(bottom: 6, right: 4),
+                          child: ScaleTransition(
+                            scale: _isListening
+                                ? _pulseAnimation
+                                : const AlwaysStoppedAnimation(1.0),
+                            child: Tooltip(
+                              message: _isListening
+                                  ? 'Dừng nhận dạng giọng nói'
+                                  : 'Nhận dạng giọng nói (STT)',
+                              child: Material(
+                                color: _isListening
+                                    ? const Color(
+                                        0xFFFF3B30,
+                                      ).withValues(alpha: 0.1)
+                                    : Colors.transparent,
+                                borderRadius: BorderRadius.circular(10),
+                                child: InkWell(
+                                  borderRadius: BorderRadius.circular(10),
+                                  onTap: _toggleSTT,
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(8),
+                                    child: Icon(
+                                      _isListening
+                                          ? Icons.stop_rounded
+                                          : Icons.mic_rounded,
+                                      color: _isListening
+                                          ? const Color(0xFFFF3B30)
+                                          : const Color(0xFFAEC6E8),
+                                      size: 22,
+                                    ),
+                                  ),
                                 ),
                               ),
                             ),
@@ -1148,98 +1818,254 @@ class _DashboardScreenState extends State<DashboardScreen>
                     ),
                   ),
                 ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            Row(children: [
-              const Text('Các file đã tải lên', style: TextStyle(color: Color(0xFF0A2F5D), fontSize: 16, fontWeight: FontWeight.w700)),
-              const SizedBox(width: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                decoration: BoxDecoration(color: const Color(0xFF0B6EDB).withValues(alpha: 0.1), borderRadius: BorderRadius.circular(10)),
-                child: Text('${_uploadedFiles.length}',
-                    style: const TextStyle(color: Color(0xFF0B6EDB), fontWeight: FontWeight.w700, fontSize: 12)),
-              ),
-            ]),
-            const SizedBox(height: 8),
-            ..._uploadedFiles.map((file) => Container(
-              margin: const EdgeInsets.only(bottom: 8),
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: const Color(0xFFE3ECFF))),
-              child: Row(children: [
-                Container(width: 32, height: 32,
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    const Text(
+                      'Các file đã tải lên',
+                      style: TextStyle(
+                        color: Color(0xFF0A2F5D),
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF0B6EDB).withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        '${_uploadedFiles.length}',
+                        style: const TextStyle(
+                          color: Color(0xFF0B6EDB),
+                          fontWeight: FontWeight.w700,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                ..._uploadedFiles.map(
+                  (file) => Container(
+                    margin: const EdgeInsets.only(bottom: 8),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 8,
+                    ),
                     decoration: BoxDecoration(
-                        color: (file.isAudio ? const Color(0xFF17A1B8) : const Color(0xFF0B6EDB)).withValues(alpha: 0.1),
-                        borderRadius: BorderRadius.circular(8)),
-                    child: Icon(file.isAudio ? Icons.audio_file_rounded : Icons.insert_drive_file_rounded,
-                        color: file.isAudio ? const Color(0xFF17A1B8) : const Color(0xFF0B6EDB), size: 16)),
-                const SizedBox(width: 8),
-                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text(file.name, style: const TextStyle(color: Color(0xFF0A2F5D), fontWeight: FontWeight.w600, fontSize: 12), overflow: TextOverflow.ellipsis),
-                  Text(file.size, style: const TextStyle(color: Color(0xFF6C8BB8), fontSize: 10)),
-                ])),
-                IconButton(padding: EdgeInsets.zero, constraints: const BoxConstraints(), tooltip: 'Tải xuống', icon: const Icon(Icons.download_rounded, color: Color(0xFF0B6EDB), size: 18), onPressed: () => _downloadFile(file)),
-                const SizedBox(width: 8),
-                IconButton(padding: EdgeInsets.zero, constraints: const BoxConstraints(), tooltip: 'Xóa', icon: const Icon(Icons.delete_outline_rounded, color: Color(0xFFCF3C3C), size: 18), onPressed: () => _removeFile(file)),
-              ]),
-            )),
-            const SizedBox(height: 14),
-            SizedBox(width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: _isSubmitting ? null : _submitReport,
-                icon: _isSubmitting 
-                    ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)) 
-                    : const Icon(Icons.send_rounded, size: 18),
-                label: Text(_isSubmitting ? 'Đang gửi...' : 'Gửi báo cáo & Lưu DB'),
-                style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF0B6EDB), foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 13),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
-              )),
-          ]),
-        ),
-      ]),
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: const Color(0xFFE3ECFF)),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 32,
+                          height: 32,
+                          decoration: BoxDecoration(
+                            color:
+                                (file.isAudio
+                                        ? const Color(0xFF17A1B8)
+                                        : const Color(0xFF0B6EDB))
+                                    .withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Icon(
+                            file.isAudio
+                                ? Icons.audio_file_rounded
+                                : Icons.insert_drive_file_rounded,
+                            color: file.isAudio
+                                ? const Color(0xFF17A1B8)
+                                : const Color(0xFF0B6EDB),
+                            size: 16,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                file.name,
+                                style: const TextStyle(
+                                  color: Color(0xFF0A2F5D),
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 12,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              Text(
+                                file.size,
+                                style: const TextStyle(
+                                  color: Color(0xFF6C8BB8),
+                                  fontSize: 10,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                          tooltip: 'Tải xuống',
+                          icon: const Icon(
+                            Icons.download_rounded,
+                            color: Color(0xFF0B6EDB),
+                            size: 18,
+                          ),
+                          onPressed: () => _downloadFile(file),
+                        ),
+                        const SizedBox(width: 8),
+                        IconButton(
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                          tooltip: 'Xóa',
+                          icon: const Icon(
+                            Icons.delete_outline_rounded,
+                            color: Color(0xFFCF3C3C),
+                            size: 18,
+                          ),
+                          onPressed: () => _removeFile(file),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: _isSubmitting ? null : _submitReport,
+                    icon: _isSubmitting
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                              color: Colors.white,
+                              strokeWidth: 2,
+                            ),
+                          )
+                        : const Icon(Icons.send_rounded, size: 18),
+                    label: Text(
+                      _isSubmitting ? 'Đang gửi...' : 'Gửi báo cáo & Lưu DB',
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF0B6EDB),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 
   Widget _buildSosPanel() {
     return Padding(
       padding: const EdgeInsets.all(12),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        Container(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(color: const Color(0xFFFFF3F3), borderRadius: BorderRadius.circular(18),
-              border: Border.all(color: const Color(0xFFFFCDD2), width: 1.5)),
-          child: const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(children: [
-              Icon(Icons.warning_amber_rounded, color: Color(0xFFCF3C3C), size: 20),
-              SizedBox(width: 6),
-              Text('Mức độ cấp cứu', style: TextStyle(color: Color(0xFFCF3C3C), fontSize: 16, fontWeight: FontWeight.w700)),
-            ]),
-            SizedBox(height: 8),
-            Text('Khẩn cấp: Liên hệ hỗ trợ ngay hoặc báo với quản lý khu vực để xử lý nhanh nhất.',
-                style: TextStyle(color: Color(0xFF53709F), fontSize: 13, height: 1.4)),
-          ]),
-        ),
-        const SizedBox(height: 14),
-        Row(children: [
-          Expanded(child: _ReportOptionCard(title: 'Gọi hỗ trợ', icon: Icons.call_rounded, color: const Color(0xFF0B6EDB), onTap: _isSubmitting ? null : _submitSos)),
-          const SizedBox(width: 12),
-          Expanded(child: _ReportOptionCard(title: 'Vị trí hiện tại', icon: Icons.location_on_rounded, color: const Color(0xFF17A1B8), onTap: _openMapPicker)),
-        ]),
-        const SizedBox(height: 14),
-        SizedBox(width: double.infinity,
-          child: ElevatedButton.icon(
-            onPressed: _isSubmitting ? null : _submitSos,
-            icon: const Icon(Icons.warning_amber_rounded, size: 20),
-            label: Text(_isSubmitting ? 'Đang gửi SOS...' : 'Gửi SOS vào Database', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
-            style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFFCF3C3C), foregroundColor: Colors.white,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFFF3F3),
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: const Color(0xFFFFCDD2), width: 1.5),
+            ),
+            child: const Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                      Icons.warning_amber_rounded,
+                      color: Color(0xFFCF3C3C),
+                      size: 20,
+                    ),
+                    SizedBox(width: 6),
+                    Text(
+                      'Mức độ cấp cứu',
+                      style: TextStyle(
+                        color: Color(0xFFCF3C3C),
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+                SizedBox(height: 8),
+                Text(
+                  'Khẩn cấp: Liên hệ hỗ trợ ngay hoặc báo với quản lý khu vực để xử lý nhanh nhất.',
+                  style: TextStyle(
+                    color: Color(0xFF53709F),
+                    fontSize: 13,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: _ReportOptionCard(
+                  title: 'Gọi hỗ trợ',
+                  icon: Icons.call_rounded,
+                  color: const Color(0xFF0B6EDB),
+                  onTap: _isSubmitting ? null : _submitSos,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _ReportOptionCard(
+                  title: 'Vị trí hiện tại',
+                  icon: Icons.location_on_rounded,
+                  color: const Color(0xFF17A1B8),
+                  onTap: _openMapPicker,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: _isSubmitting ? null : _submitSos,
+              icon: const Icon(Icons.warning_amber_rounded, size: 20),
+              label: Text(
+                _isSubmitting ? 'Đang gửi SOS...' : 'Gửi SOS vào Database',
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFCF3C3C),
+                foregroundColor: Colors.white,
                 padding: const EdgeInsets.symmetric(vertical: 15),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))),
-          )),
-      ]),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1248,127 +2074,200 @@ class _DashboardScreenState extends State<DashboardScreen>
       padding: const EdgeInsets.all(12),
       child: Container(
         padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(color: const Color(0xFFF4F8FF), borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: const Color(0xFFDBE7FF))),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-            const Expanded(
-              child: Text('Lịch sử báo cáo trong Database',
-                  style: TextStyle(color: Color(0xFF0A2F5D), fontSize: 16, fontWeight: FontWeight.w700),
-                  overflow: TextOverflow.ellipsis),
-            ),
-            IconButton(
-              icon: const Icon(Icons.refresh_rounded, color: Color(0xFF0B6EDB), size: 20),
-              tooltip: 'Làm mới',
-              onPressed: _fetchHistory,
-            ),
-          ]),
-          const SizedBox(height: 10),
-          if (_isLoadingHistory)
-            const Center(child: Padding(padding: EdgeInsets.all(20), child: CircularProgressIndicator()))
-          else if (_historyCases.isEmpty)
-            const Padding(padding: EdgeInsets.all(16), child: Text('Chưa có báo cáo nào trong Database.', style: TextStyle(color: Color(0xFF53709F))))
-          else
-            ListView.separated(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: _historyCases.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 10),
-              itemBuilder: (ctx, index) {
-                final item = _historyCases[index];
-                return Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: const Color(0xFFE3ECFF)),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF4F8FF),
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: const Color(0xFFDBE7FF)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Expanded(
+                  child: Text(
+                    'Lịch sử báo cáo trong Database',
+                    style: TextStyle(
+                      color: Color(0xFF0A2F5D),
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                    ),
+                    overflow: TextOverflow.ellipsis,
                   ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Expanded(
-                            child: Wrap(
-                              crossAxisAlignment: WrapCrossAlignment.center,
-                              spacing: 6,
-                              runSpacing: 4,
-                              children: [
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                  decoration: BoxDecoration(
-                                    color: item.reportType == 'SOS' 
-                                        ? const Color(0xFFCF3C3C).withValues(alpha: 0.1) 
-                                        : const Color(0xFF0B6EDB).withValues(alpha: 0.1),
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
-                                  child: Text(
-                                    '#${item.id} - ${item.reportType}',
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.w700,
-                                      fontSize: 12,
-                                      color: item.reportType == 'SOS' ? const Color(0xFFCF3C3C) : const Color(0xFF0B6EDB),
+                ),
+                IconButton(
+                  icon: const Icon(
+                    Icons.refresh_rounded,
+                    color: Color(0xFF0B6EDB),
+                    size: 20,
+                  ),
+                  tooltip: 'Làm mới',
+                  onPressed: _fetchHistory,
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            if (_isLoadingHistory)
+              const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(20),
+                  child: CircularProgressIndicator(),
+                ),
+              )
+            else if (_historyCases.isEmpty)
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text(
+                  'Chưa có báo cáo nào trong Database.',
+                  style: TextStyle(color: Color(0xFF53709F)),
+                ),
+              )
+            else
+              ListView.separated(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: _historyCases.length,
+                separatorBuilder: (_, _) => const SizedBox(height: 10),
+                itemBuilder: (ctx, index) {
+                  final item = _historyCases[index];
+                  return Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: const Color(0xFFE3ECFF)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Expanded(
+                              child: Wrap(
+                                crossAxisAlignment: WrapCrossAlignment.center,
+                                spacing: 6,
+                                runSpacing: 4,
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                      vertical: 3,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: item.reportType == 'SOS'
+                                          ? const Color(
+                                              0xFFCF3C3C,
+                                            ).withValues(alpha: 0.1)
+                                          : const Color(
+                                              0xFF0B6EDB,
+                                            ).withValues(alpha: 0.1),
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                    child: Text(
+                                      '#${item.id} - ${item.reportType}',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w700,
+                                        fontSize: 12,
+                                        color: item.reportType == 'SOS'
+                                            ? const Color(0xFFCF3C3C)
+                                            : const Color(0xFF0B6EDB),
+                                      ),
                                     ),
                                   ),
-                                ),
-                                if (item.location.isNotEmpty)
-                                  Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      const Icon(Icons.location_on_rounded, size: 13, color: Color(0xFF8AA5C7)),
-                                      const SizedBox(width: 2),
-                                      Flexible(
-                                        child: Text(
-                                          item.location,
-                                          style: const TextStyle(fontSize: 12, color: Color(0xFF53709F)),
-                                          overflow: TextOverflow.ellipsis,
+                                  if (item.location.isNotEmpty)
+                                    Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const Icon(
+                                          Icons.location_on_rounded,
+                                          size: 13,
+                                          color: Color(0xFF8AA5C7),
                                         ),
-                                      ),
-                                    ],
-                                  ),
-                              ],
+                                        const SizedBox(width: 2),
+                                        Flexible(
+                                          child: Text(
+                                            item.location,
+                                            style: const TextStyle(
+                                              fontSize: 12,
+                                              color: Color(0xFF53709F),
+                                            ),
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                ],
+                              ),
                             ),
+                            const SizedBox(width: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 7,
+                                vertical: 3,
+                              ),
+                              decoration: BoxDecoration(
+                                color: const Color(
+                                  0xFF1AA06A,
+                                ).withValues(alpha: 0.1),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                item.status,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 11,
+                                  color: Color(0xFF1AA06A),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          item.description,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            color: Color(0xFF0A2F5D),
+                            height: 1.4,
                           ),
-                          const SizedBox(width: 6),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF1AA06A).withValues(alpha: 0.1),
-                              borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: Text(
-                              item.status,
-                              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 11, color: Color(0xFF1AA06A)),
-                            ),
+                        ),
+                        if (item.evidences.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          Wrap(
+                            spacing: 6,
+                            runSpacing: 4,
+                            children: item.evidences
+                                .map(
+                                  (e) => Chip(
+                                    padding: const EdgeInsets.all(2),
+                                    avatar: Icon(
+                                      e.fileType == 'image'
+                                          ? Icons.image_rounded
+                                          : e.fileType == 'audio'
+                                          ? Icons.audiotrack_rounded
+                                          : Icons.insert_drive_file_rounded,
+                                      size: 14,
+                                    ),
+                                    label: Text(
+                                      e.fileName,
+                                      style: const TextStyle(fontSize: 10),
+                                    ),
+                                    backgroundColor: const Color(0xFFF4F8FF),
+                                  ),
+                                )
+                                .toList(),
                           ),
                         ],
-                      ),
-                      const SizedBox(height: 8),
-                      Text(item.description, style: const TextStyle(fontSize: 13, color: Color(0xFF0A2F5D), height: 1.4)),
-                      if (item.evidences.isNotEmpty) ...[
-                        const SizedBox(height: 8),
-                        Wrap(
-                          spacing: 6,
-                          runSpacing: 4,
-                          children: item.evidences.map((e) => Chip(
-                            padding: const EdgeInsets.all(2),
-                            avatar: Icon(
-                              e.fileType == 'image' ? Icons.image_rounded : e.fileType == 'audio' ? Icons.audiotrack_rounded : Icons.insert_drive_file_rounded,
-                              size: 14,
-                            ),
-                            label: Text(e.fileName, style: const TextStyle(fontSize: 10)),
-                            backgroundColor: const Color(0xFFF4F8FF),
-                          )).toList(),
-                        ),
                       ],
-                    ],
-                  ),
-                );
-              },
-            ),
-        ]),
+                    ),
+                  );
+                },
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -1378,12 +2277,28 @@ class _DashboardScreenState extends State<DashboardScreen>
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
       decoration: const BoxDecoration(color: Color(0xFF0B3B7A)),
-      child: Wrap(spacing: 12, runSpacing: 8, alignment: WrapAlignment.spaceBetween, crossAxisAlignment: WrapCrossAlignment.center, children: [
-        ConstrainedBox(constraints: const BoxConstraints(maxWidth: 700),
-            child: const Text('Hotline: 1900 1234  -  Email: support@uel.edu.vn  -  Địa chỉ: 669 Quốc lộ 1A, TP. Thủ Đức, TP. Hồ Chí Minh',
-                style: TextStyle(color: Colors.white70, fontSize: 12), softWrap: true, overflow: TextOverflow.ellipsis, maxLines: 2)),
-        Text('2026 UEL Support Center', style: theme.textTheme.labelMedium?.copyWith(color: Colors.white70)),
-      ]),
+      child: Wrap(
+        spacing: 12,
+        runSpacing: 8,
+        alignment: WrapAlignment.spaceBetween,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 700),
+            child: const Text(
+              'Hotline: 1900 1234  -  Email: support@uel.edu.vn  -  Địa chỉ: 669 Quốc lộ 1A, TP. Thủ Đức, TP. Hồ Chí Minh',
+              style: TextStyle(color: Colors.white70, fontSize: 12),
+              softWrap: true,
+              overflow: TextOverflow.ellipsis,
+              maxLines: 2,
+            ),
+          ),
+          Text(
+            '2026 UEL Support Center',
+            style: theme.textTheme.labelMedium?.copyWith(color: Colors.white70),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1391,14 +2306,23 @@ class _DashboardScreenState extends State<DashboardScreen>
 // ─── DATA CLASSES ──────────────────────────────────────────────────────────────
 
 class _SidebarItem {
-  const _SidebarItem({required this.title, required this.icon, required this.subtitle});
+  const _SidebarItem({
+    required this.title,
+    required this.icon,
+    required this.subtitle,
+  });
   final String title;
   final IconData icon;
   final String subtitle;
 }
 
 class _NotifItem {
-  const _NotifItem({required this.icon, required this.color, required this.title, required this.time});
+  const _NotifItem({
+    required this.icon,
+    required this.color,
+    required this.title,
+    required this.time,
+  });
   final IconData icon;
   final Color color;
   final String title;
@@ -1408,7 +2332,14 @@ class _NotifItem {
 // ─── WIDGETS ───────────────────────────────────────────────────────────────────
 
 class _HeaderAction extends StatefulWidget {
-  const _HeaderAction({super.key, required this.label, required this.icon, required this.onTap, this.badge, this.highlight = false});
+  const _HeaderAction({
+    super.key,
+    required this.label,
+    required this.icon,
+    required this.onTap,
+    this.badge,
+    this.highlight = false,
+  });
   final String label;
   final IconData icon;
   final VoidCallback onTap;
@@ -1437,21 +2368,53 @@ class _HeaderActionState extends State<_HeaderAction> {
                 ? Colors.white.withValues(alpha: _hovered ? 0.28 : 0.18)
                 : Colors.white.withValues(alpha: _hovered ? 0.15 : 0.08),
             borderRadius: BorderRadius.circular(12),
-            border: widget.highlight ? Border.all(color: Colors.white.withValues(alpha: 0.4)) : null,
+            border: widget.highlight
+                ? Border.all(color: Colors.white.withValues(alpha: 0.4))
+                : null,
           ),
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            Stack(clipBehavior: Clip.none, children: [
-              Icon(widget.icon, color: Colors.white, size: 17),
-              if (widget.badge != null)
-                Positioned(top: -6, right: -8, child: Container(
-                  width: 15, height: 15,
-                  decoration: const BoxDecoration(color: Color(0xFFFF3B30), shape: BoxShape.circle),
-                  child: Center(child: Text(widget.badge!, style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w700))),
-                )),
-            ]),
-            const SizedBox(width: 7),
-            Text(widget.label, style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600)),
-          ]),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Icon(widget.icon, color: Colors.white, size: 17),
+                  if (widget.badge != null)
+                    Positioned(
+                      top: -6,
+                      right: -8,
+                      child: Container(
+                        width: 15,
+                        height: 15,
+                        decoration: const BoxDecoration(
+                          color: Color(0xFFFF3B30),
+                          shape: BoxShape.circle,
+                        ),
+                        child: Center(
+                          child: Text(
+                            widget.badge!,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 9,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(width: 7),
+              Text(
+                widget.label,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1475,7 +2438,12 @@ class _AudioRecordCard extends StatelessWidget {
 }
 
 class _ReportOptionCard extends StatelessWidget {
-  const _ReportOptionCard({required this.title, required this.icon, required this.color, this.onTap});
+  const _ReportOptionCard({
+    required this.title,
+    required this.icon,
+    required this.color,
+    this.onTap,
+  });
   final String title;
   final IconData icon;
   final Color color;
@@ -1500,7 +2468,15 @@ class _ReportOptionCard extends StatelessWidget {
             children: [
               Icon(icon, color: color, size: 26),
               const SizedBox(height: 5),
-              Text(title, style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 13), textAlign: TextAlign.center),
+              Text(
+                title,
+                style: TextStyle(
+                  color: color,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13,
+                ),
+                textAlign: TextAlign.center,
+              ),
             ],
           ),
         ),
