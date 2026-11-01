@@ -16,26 +16,27 @@ class MapLocationPickerConfig {
             '?api_key=$goongMapKey'
       : fallbackStyle;
 
-  /// High-reliability CartoDB Voyager raster style for MapLibre.
+  /// Keyless Esri World Street Map raster style for MapLibre.
+  /// Does NOT watermark "API KEY REQUIRED" and does NOT return 403.
   static const String fallbackStyle = r'''{
   "version": 8,
   "sources": {
-    "carto": {
+    "esri": {
       "type": "raster",
       "tiles": [
-        "https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png"
+        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}"
       ],
       "tileSize": 256,
-      "attribution": "© OpenStreetMap, © CARTO"
+      "attribution": "Tiles © Esri"
     }
   },
   "layers": [
     {
-      "id": "carto-tiles",
+      "id": "esri-tiles",
       "type": "raster",
-      "source": "carto",
+      "source": "esri",
       "minzoom": 0,
-      "maxzoom": 20
+      "maxzoom": 19
     }
   ]
 }
